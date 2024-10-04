@@ -1,0 +1,109 @@
+```{r}
+library(biomformat)
+library(stringr)
+library(ape)
+library(qiime2R)
+library(phyloseq)
+library(dplyr)
+```
+
+```{r}
+# data preprocessing
+## file path
+set.seed(1)
+filepath <- "../data/Yan"
+folders<-list.files(path = filepath)
+i=1
+
+## read the biom
+filep<-paste(filepath,"/","reference-hit.biom", sep = "")
+x = read_biom(filep)
+
+## read the tree
+treep<-paste(filepath,"/","insertion_tree.relabelled.tre", sep = "")
+treefile = readChar(treep,file.info(treep)$size)
+
+str_count(treefile, pattern = '; ')
+treefile2 = gsub('; ','|',treefile)
+tree = read.tree(text=treefile2)
+
+## check na edges
+nalength=is.na(tree$edge.length)
+nonzerolength=tree$edge.length!=0
+tree$edge.length[nalength]=sample(tree$edge.length[(!nalength)&nonzerolength], sum(nalength))
+sum(tree$edge.length==0 & tree$edge[,2]<=length(tree$tip.label))
+```
+
+```{r}
+## read metafile
+meta = read.delim(paste(filepath,"/","11757_20210706-122748.txt", sep = ""))
+samplenames <- sapply(x$columns, function(y){y$id})
+meta <- meta[meta$sample_name %in% samplenames,]
+asv <- sapply(x$rows, function(y){y$id})
+
+## only age<30 samples
+selectedmeta <- meta %>% select(sample_name,age,sex) %>%
+    mutate(age = as.numeric(age)) %>%
+    filter((age<30))
+
+## filter out sample counts/leaves
+A <- sapply(x$data,function(y,subsamplenames){y[subsamplenames]}, subsamplenames = selectedmeta$sample_name)
+colnames(A) <- asv
+rownames(selectedmeta) <- selectedmeta$sample_name
+drop_tips <- tree$tip.label[!(tree$tip.label %in% colnames(A))]
+tree <- ape::drop.tip(tree,drop_tips) %>% ape::as.phylo()
+
+## filter out taxa that appears less than 10% samples
+prevalence = colSums(A!=0)
+rare_taxa = colnames(A)[prevalence<(0.1*nrow(A))]
+
+drop_tips <- tree$tip.label[(tree$tip.label %in% rare_taxa)]
+tree <- ape::drop.tip(tree,drop_tips) %>% ape::as.phylo()
+
+A = A[,!(colnames(A)%in%rare_taxa)]
+```
+
+```{r}
+## taxonomy
+taxonomy = read_qza(paste(filepath,"/","taxonomy.qza", sep = ""))$data
+taxonomy[c('kingdom',"phylum", "class", "order", 'family','genus',"species")] <- str_split_fixed(taxonomy$Taxon, ';', 7)
+ 
+## Rearrange columns and remove original name column
+tax <- taxonomy[c('kingdom',"phylum", "class", "order", 'family','genus',"species")]
+rownames(tax) = taxonomy$Feature.ID
+
+## match taxonomy and colnames of count matrix
+tax = tax[colnames(A),]
+sum(colnames(A)!=rownames(tax))
+```
+
+```{r}
+## check zero-taxa
+## remove zero taxa
+ind = (colSums(A)!=0)
+A = A[,ind]
+tax = tax[ind,]
+drop_tips <- tree$tip.label[!(tree$tip.label %in% colnames(A))]
+tree <- ape::drop.tip(tree,drop_tips) %>% ape::as.phylo()
+```
+
+```{r}
+## phylogenetic tree
+OTU = otu_table(A,taxa_are_rows=F) # matrix
+META = sample_data(selectedmeta) # data frame
+PHYLO = phy_tree(tree) # tree (list)
+TAXA = tax_table(as.matrix(tax))
+physeq = phyloseq(OTU,TAXA,META, PHYLO)
+```
+
+
+```{r}
+## aggregate taxa into order level
+phy.order = tax_glom(physeq,taxrank = "order")
+count.order = otu_table(phy.order)@.Data
+dist_order = cophenetic.phylo(phy.order@phy_tree)
+write.csv(as.matrix(dist_order),file = "../data/dist_order.csv")
+write.csv(t(count.order),file = '../data/count_order.csv')
+```
+
+

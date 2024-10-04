@@ -1,0 +1,226 @@
+```{r}
+source("./function.R")
+```
+
+```{r}
+count = read.csv("../data/count_order.csv")
+count = count[,-1]
+
+dist = read.csv("../data/dist_order.csv")
+dist = as.matrix(dist[,-1])
+```
+
+```{r}
+init_dataset_da = function(m,n,count,dist,k,k1,p,ez=5,lib_var=T){
+  d = nrow(count)
+  O_list = list()
+  w_list = list()
+  X_list = list()
+  meta_list = list()
+  
+  prevalence = rowSums(count!=0)
+  diff_idx = order(prevalence,decreasing = T)[k:1]
+  idx1 = sample(k,k1)
+  seq_idx1 = diff_idx[idx1]
+  seq_idx2 = diff_idx[-idx1]
+  sample_info = c()
+
+  A = exp(-dist/0.1)
+  L = diag(colSums(A))-A
+  svd_res = svd(L)
+  U = svd_res$u
+  U = U[,(ncol(U)-100):(ncol(U))]
+  
+  control_sample_list = list()
+  
+  for(i in 1:m){
+    idx = sample(ncol(count),n)
+    X = as.matrix(count[,idx])
+    Y = sample(0:1,n,T,prob = c(p[i],1-p[i]))
+   
+    X[seq_idx1,which(Y==0)] = (X[seq_idx1,which(Y==0)])/ez
+    X[seq_idx2,which(Y==0)] = (X[seq_idx2,which(Y==0)])*ez
+    
+    index = sample(100,30)
+    w_space = U[,index]
+    weight = 1-2*runif(30)
+    
+    w = (w_space%*%as.matrix(weight))[,1]
+    w = (w-min(w)+1e-3)
+    w = w/max(w)
+    w = w/mean(w)*0.5
+
+    if(lib_var){
+      if(i%%2 == 1){
+        X_lib = X%*%diag(sample(100:500,n,replace = T))
+      }else{
+        X_lib = X%*%diag(sample(10:100,n,replace = T))
+        }
+    }else{
+      X_lib = X
+    }
+   
+    meta_list[[i]] = data.frame("Y" = Y) 
+    O_list[i] = list(floor(diag(w)%*%X_lib))
+    w_list[i] = list(w)
+    X_list[i] = list(floor(X))
+    diff_idx = c(seq_idx1,seq_idx2)
+  }
+  return(list(O_list, w_list, X_list, diff_idx, meta_list))
+}
+
+```
+
+```{r}
+rdb_test = function(X,Y,Clade,alpha=0.1){
+  P = t(X)/colSums(X)
+  res = which(RDB::rdb(P,Y,alpha = alpha)==T)
+  if(length(res)==0){
+    fdr = 0
+  }else{
+    fdr = mean(!res %in% Clade)
+  }
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+```
+
+```{r}
+linda_test = function(X,meta,Clade,alpha = 0.1){
+  res =  which(MicrobiomeStat::linda(X,meta,formula = "~Y",
+           p.adj.method = "BH", alpha = 0.1)$output$Y$reject==T)
+  if(length(res)==0){
+    fdr = 0
+  }else{
+    fdr = mean(!res %in% Clade)
+  }
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+```
+
+```{r}
+m = 5
+n = 50
+alpha = 0.01
+beta = 0.01
+gamma = 1
+alpha = 0.1
+d = nrow(count)
+```
+
+```{r,warning=FALSE,message=F}
+fdr_table = c()
+fdr_table = rbind(fdr_table,c(0,0,"Truth","t-test"),c(0,0,"Truth","RDB"),c(0,0,"Truth","LinDA"))
+fdr_table = rbind(fdr_table,c(0,0,"Unprocessed","t-test"),c(0,0,"Unprocessed","RDB"),c(0,0,"Unprocessed","LinDA"))
+fdr_table = rbind(fdr_table,c(0,0,"MetaDICT","t-test"),c(0,0,"MetaDICT","RDB"),c(0,0,"MetaDICT","LinDA"))
+fdr_table = rbind(fdr_table,c(0,0,"ConQuR","t-test"),c(0,0,"ConQuR","RDB"),c(0,0,"ConQuR","LinDA"))
+fdr_table = rbind(fdr_table,c(0,0,"ComBatSeq","t-test"),c(0,0,"ComBatSeq","RDB"),c(0,0,"ComBatSeq","LinDA"))
+fdr_table = rbind(fdr_table,c(0,0,"MMUPHin","t-test"),c(0,0,"MMUPHin","RDB"),c(0,0,"MMUPHin","LinDA"))
+fdr_table = as.data.frame(fdr_table)
+fdr_table[,1] = as.numeric(fdr_table[,1])
+fdr_table[,2] = as.numeric(fdr_table[,2])
+
+for(i in 1:500){
+  res = init_dataset_da(m,n,count,dist,floor(0.05*d),floor(0.02*d),ez=5, lib_var = T, c(1/2,1/2,1/2,1/2,1/2))
+  O_list = res[[1]]
+  X_t = do.call(cbind,res[[3]])
+  diff_seq = res[[4]]
+  meta_list = res[[5]]
+  meta = do.call(rbind,meta_list)
+  
+  O = do.call(cbind,O_list)
+  meta$batch = as.factor(do.call(c,lapply(1:m, function(x)rep(x,n))))
+  batchid = meta$batch
+  Y = as.factor(meta$Y)
+  
+  res1 = t_test(X_t,Y,diff_seq,alpha = 0.1,method = "BH")
+  res2 = rdb_test(X_t,Y,diff_seq)
+  res3 = linda_test(X_t,meta,diff_seq)
+  
+  k = 0
+  fdr_table[k+1,1:2] = fdr_table[k+1,1:2]+c(res1$FDR,res1$Sensitivity)
+  fdr_table[k+2,1:2] = fdr_table[k+2,1:2]+c(res2$FDR,res2$Sensitivity)
+  fdr_table[k+3,1:2] = fdr_table[k+3,1:2]+c(res3$FDR,res3$Sensitivity)
+
+  res1 = t_test(O,Y,diff_seq,alpha = 0.1,method = "BH")
+  res2 = rdb_test(O,Y,diff_seq)
+  res3 = linda_test(O,meta,diff_seq)
+  
+  k = 3
+  fdr_table[k+1,1:2] = fdr_table[k+1,1:2]+c(res1$FDR,res1$Sensitivity)
+  fdr_table[k+2,1:2] = fdr_table[k+2,1:2]+c(res2$FDR,res2$Sensitivity)
+  fdr_table[k+3,1:2] = fdr_table[k+3,1:2]+c(res3$FDR,res3$Sensitivity)
+
+  X = metadict(O_list,alpha,beta,gamma,dist,meta_list)$X
+  res1 = t_test(X,Y,diff_seq,alpha = 0.1,method = "BH")
+  res2 = rdb_test(X,Y,diff_seq)
+  res3 = linda_test(X/mean(X)*mean(as.matrix(O)),meta,diff_seq)
+  k = 6
+  fdr_table[k+1,1:2] = fdr_table[k+1,1:2]+c(res1$FDR,res1$Sensitivity)
+  fdr_table[k+2,1:2] = fdr_table[k+2,1:2]+c(res2$FDR,res2$Sensitivity)
+  fdr_table[k+3,1:2] = fdr_table[k+3,1:2]+c(res3$FDR,res3$Sensitivity)
+
+  res.ConQuR = ConQuR(t(O),batchid,batch_ref = 1,covariates = Y)
+  res1 = t_test(t(res.ConQuR),Y,diff_seq,alpha = 0.1,method = "BH")
+  res2 = rdb_test(t(res.ConQuR),Y,diff_seq)
+  res3 = linda_test(t(res.ConQuR),meta,diff_seq)
+  k = 9
+  fdr_table[k+1,1:2] = fdr_table[k+1,1:2]+c(res1$FDR,res1$Sensitivity)
+  fdr_table[k+2,1:2] = fdr_table[k+2,1:2]+c(res2$FDR,res2$Sensitivity)
+  fdr_table[k+3,1:2] = fdr_table[k+3,1:2]+c(res3$FDR,res3$Sensitivity)
+
+  res.ComBatSeq = sva::ComBat_seq(as.matrix(O),batchid,Y)
+  res1 = t_test(res.ComBatSeq,Y,diff_seq,alpha = 0.1,method = "BH")
+  res2 = rdb_test(res.ComBatSeq,Y,diff_seq)
+  res3 = linda_test(res.ComBatSeq,meta,diff_seq)
+  k = 12
+  fdr_table[k+1,1:2] = fdr_table[k+1,1:2]+c(res1$FDR,res1$Sensitivity)
+  fdr_table[k+2,1:2] = fdr_table[k+2,1:2]+c(res2$FDR,res2$Sensitivity)
+  fdr_table[k+3,1:2] = fdr_table[k+3,1:2]+c(res3$FDR,res3$Sensitivity)
+  
+  colnames(O) = sapply(1:ncol(O),function(x)paste("Sample",x))
+  
+  rownames(meta) = sapply(1:ncol(O),function(x)paste("Sample",x))
+  res.mmuphin = adjust_batch(feature_abd = O,
+                                batch = "batch",
+                                covariates = "Y",
+                                data = meta)$feature_abd_adj
+  res1 = t_test(res.mmuphin,Y,diff_seq,alpha = 0.1,method = "BH")
+  res2 = rdb_test(res.mmuphin,Y,diff_seq)
+  res3 = linda_test(res.mmuphin,meta,diff_seq)
+  k = 15
+  fdr_table[k+1,1:2] = fdr_table[k+1,1:2]+c(res1$FDR,res1$Sensitivity)
+  fdr_table[k+2,1:2] = fdr_table[k+2,1:2]+c(res2$FDR,res2$Sensitivity)
+  fdr_table[k+3,1:2] = fdr_table[k+3,1:2]+c(res3$FDR,res3$Sensitivity)
+}
+```
+
+```{r}
+DA_res = fdr_table[-c(1,2,3),]
+DA_res[,1:2] = DA_res[,1:2]/500
+```
+
+```{r}
+plot_data = data.frame("Value" = c(DA_res[,1],DA_res[,2]),"Type" = c(rep("FDR",nrow(DA_res)),rep("Sensitivity",nrow(DA_res))),"Method" = rep(DA_res[,3],2),"DA" = rep(DA_res[,4],2))
+```
+
+```{r}
+plot_data$DA = factor(plot_data$DA,levels = c("t-test","RDB","LinDA"))
+```
+
+```{r}
+library(ggplot2)
+ggplot(data=plot_data, aes(x=DA, y = Value, fill = Method))+
+geom_bar(stat="identity",
+         position=position_dodge(),
+         width = 0.8)+
+  facet_grid(cols = vars(Type))+ 
+  scale_fill_brewer(palette="Set2")+
+  geom_abline(intercept = 0.1, slope = 0,color="black", linetype = 2)+
+  xlab("")+ 
+  ylab("")+
+  ylim(0,1)+
+  theme_bw()+
+  labs(colour = "Method")+
+  theme(legend.position="bottom")
+```
+
