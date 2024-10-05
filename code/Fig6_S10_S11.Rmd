@@ -19,15 +19,15 @@ library(pROC)
 
 ```{r}
 #load(url("https://github.com/AlessioMilanese/motus_taxonomy/blob/master/data/motus_taxonomy_2.5.1.Rdata?raw=true"))
-load("../data/motus_taxonomy_2.5.1.Rdata")
+load("../data/Rawdata_Wirbel/motus_taxonomy_2.5.1.Rdata")
 ```
 
 ```{r}
-count = read.table("../data/3517209/species_profiles_g2_l75_motus2.0.0.tsv",sep='\t', stringsAsFactors = FALSE,
+count = read.table("../data/Rawdata_Wirbel/species_profiles_g2_l75_motus2.0.0.tsv",sep='\t', stringsAsFactors = FALSE,
                         header = TRUE, check.names = FALSE, row.names = 1,
                         quote='')
 
-meta = readr::read_tsv("../data/3517209/meta_all.tsv")
+meta = readr::read_tsv("../data/Rawdata_Wirbel/meta_all.tsv")
 ```
 
 ```{r}

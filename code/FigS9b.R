@@ -3,7 +3,7 @@ library(doParallel)
 library(MMUPHin)
 source("./function.R")
 
-load("../data/CRC.RData")
+load("../data/CRC_Duvallet.RData")
 
 ## seed 1-500
 #jobid <- as.numeric(Sys.getenv("SLURM_ARRAY_TASK_ID"))
