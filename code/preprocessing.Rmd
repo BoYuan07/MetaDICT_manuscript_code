@@ -52,15 +52,6 @@ colnames(A) <- asv
 rownames(selectedmeta) <- selectedmeta$sample_name
 drop_tips <- tree$tip.label[!(tree$tip.label %in% colnames(A))]
 tree <- ape::drop.tip(tree,drop_tips) %>% ape::as.phylo()
-
-## filter out taxa that appears less than 10% samples
-prevalence = colSums(A!=0)
-rare_taxa = colnames(A)[prevalence<(0.1*nrow(A))]
-
-drop_tips <- tree$tip.label[(tree$tip.label %in% rare_taxa)]
-tree <- ape::drop.tip(tree,drop_tips) %>% ape::as.phylo()
-
-A = A[,!(colnames(A)%in%rare_taxa)]
 ```
 
 ```{r}
