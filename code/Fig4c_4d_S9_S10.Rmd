@@ -1,0 +1,780 @@
+```{r}
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(bayesm)
+library(PLSDAbatch)
+source("./function.R")
+
+count = read.csv("../data/count_order.csv")
+count = count[,-1]
+
+dist = read.csv("../data/dist_order.csv")
+dist = as.matrix(dist[,-1])
+```
+
+```{r}
+init_dataset <- function(m, n, count, dist, k, prob, neighbor = 5, sigma = 1, ez = 10, lib_var = TRUE) {
+  d <- nrow(count)
+  O_list <- list()
+  X_list <- list()
+  meta.list <- list()
+  meta.list1 <- list()
+  
+  # Initialize adjacency matrix
+  A <- matrix(0, d, d)
+  
+  # Randomly assign taxa groups
+  taxagroup <- sample(1:5, size = d, replace = TRUE, prob = rep(1/5, 5))
+  
+  # Construct adjacency matrix based on distance
+  for (i in 1:d) {
+    idx <- order(dist[i,], decreasing = FALSE)[2:(neighbor + 1)]
+    A[i, idx] <- exp(-dist[i, idx] / sigma)
+    A[idx, i] <- exp(-dist[i, idx] / sigma)
+  }
+  
+  # Compute graph Laplacian
+  D1 <- diag(rowSums(A))
+  L <- D1 - A
+  svd_res <- svd(L)
+  U <- svd_res$u
+  U <- U[, (ncol(U) - k + 1):ncol(U)]
+  
+  # Initialize measurement efficiency matrix
+  w_list <- matrix(0, m, d)
+  
+  # Generate synthetic datasets
+  for (i in 1:m) {
+    idx1 <- sample(ncol(count), n)
+    X <- as.matrix(count[, idx1])
+    
+    # Sample Y and Y2 group labels
+    Y <- sample(1:4, size = n, replace = TRUE, prob = prob[[i]])
+    Y2 <- sample(1:3, size = n, replace = TRUE, prob = rep(1/3, 3))
+    
+    # Apply scaling factors based on taxonomic groups
+    X[taxagroup == 2, Y == 1] <- (X[taxagroup == 2, Y == 1] + 1) * ez
+    X[taxagroup == 3, Y == 2] <- (X[taxagroup == 3, Y == 2] + 1) * ez
+    X[taxagroup == 4, Y == 3] <- (X[taxagroup == 4, Y == 3] + 1) * ez
+    X[taxagroup == 5, Y == 4] <- (X[taxagroup == 5, Y == 4] + 1) * ez
+
+    # Apply library size variation
+    if (lib_var) {
+      if (i %% 2 == 1) {
+        X_lib <- X %*% diag(sample(100:500, n, replace = TRUE))
+      } else {
+        X_lib <- X %*% diag(sample(10:50, n, replace = TRUE))
+      }
+    }
+
+    # Generate taxa-specific bias
+    w_space <- U
+    weight <- 1 - 2 * runif(k)
+    w <- (w_space %*% as.matrix(weight))[, 1]
+    w <- (w - min(w) + 0.05)
+    w <- w / max(w)
+
+    # Store results in lists
+    O_list[[i]] <- floor(diag(w) %*% X_lib)
+    w_list[i, ] <- w
+    X_list[[i]] <- X
+    meta.list[[i]] <- data.frame(
+      "Y" = sapply(Y, function(x) paste("Group", x)),
+      "Y2" = sapply(Y2, function(x) paste("Group", x))
+    )
+    meta.list1[[i]] <- data.frame("Y2" = sapply(Y2, function(x) paste("Group", x)))
+  }
+  
+  return(list(O_list, w_list, X_list, meta.list, taxagroup, meta.list1))
+}
+
+
+```
+
+
+```{r}
+m <- 2
+n <- 50
+
+# Define probability distributions
+p1 <- list(c(1/4, 1/4, 1/4, 1/4), c(1/4, 1/4, 1/4, 1/4))
+p2 <- list(c(1/8, 1/2, 1/8, 1/2), c(1/2, 1/8, 1/2, 1/8))
+
+# Store probability lists
+p.list <- list(p1, p2)
+
+# Define batch effect levels
+level <- c("None", "Medium")
+
+# Generate batch IDs for samples
+batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+```
+
+```{r}
+set.seed(2025)
+
+for (iter in 1:500) {
+  for (i in 1:2) {
+    
+    # Retrieve probability distribution
+    p <- p.list[[i]]
+    
+    # Generate synthetic dataset
+    data <- init_dataset(m, n, count, dist, k = 10, ez = 50, prob = p)
+    
+    # Extract dataset components
+    O_list <- data[[1]]
+    w_list_t <- data[[2]]
+    X_t <- do.call(cbind, data[[3]])
+    meta.list <- data[[4]]
+    diff_set <- data[[5]]
+    meta.list1 <- data[[6]]
+    
+    # Combine metadata and convert to factors
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+    meta$batch <- batchid
+    
+    # Combine additional metadata
+    meta1 <- do.call("rbind", meta.list1)
+    O <- do.call(cbind, O_list)
+    
+    # Save data to files
+    write.csv(O, paste0("../data/Simulation_data/fig4cd/count/count_", i, "_iter", iter, ".csv"), row.names = FALSE)
+    write.csv(meta, paste0("../data/Simulation_data/fig4cd/meta/meta_", i, "_iter", iter, ".csv"), row.names = FALSE)
+    
+    save(O_list, meta.list, meta.list1, diff_set, 
+         file = paste0("../data/Simulation_data/fig4cd/rdata/rdata_", i, "_iter", iter, ".RData"))
+  }
+}
+```
+
+```{r}
+res <- data.frame("ARI" = numeric(),"Method" = character(),"level" = character(), "Cov" = character(),"Type" = character())
+for(iter in 1:500){
+  for(i in 1:2){
+    p <- p.list[[i]]
+    load(paste0("../data/Simulation_data/fig4cd/rdata/rdata_",i,"_iter",iter,".RData"))
+    
+    meta <- do.call("rbind",meta.list)
+    meta$Y <- as.factor(meta$Y)
+    meta$Y2 <- as.factor(meta$Y2)
+    
+    meta1 <- do.call("rbind",meta.list1)
+    meta1$Y2 <- as.factor(meta1$Y2)
+    batchid <- as.factor(do.call(c,lapply(1:m, function(x)rep(x,n))))
+    O <- do.call(cbind,O_list)
+    
+    #######unprocessed data
+    res <- rbind(res,c(adjustedRandIndex(community_detection(O,K=10)$cluster,diff_set),"Unprocessed",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(community_detection(O,K=10)$cluster,diff_set),"Unprocessed",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(community_detection(t(O),K=10)$cluster,meta$Y),"Unprocessed",level[i],"With","Sample"))
+    res <- rbind(res,c(adjustedRandIndex(community_detection(t(O),K=10)$cluster,meta$Y),"Unprocessed",level[i],"Without","Sample"))
+  
+  
+  
+    #######single dataset
+    ari <- c()
+    avg_silwidth <- c()
+    for(j in 1:m){
+        membership <- community_detection(O_list[[j]],K=10)$cluster
+        if(length(unique(membership))!=1){
+              avg_silwidth <- c(avg_silwidth,mean(cluster::silhouette(membership, dist(O_list[[j]], method = "euclidean"))[,3], na.rm = TRUE))
+              ari <- c(ari,adjustedRandIndex(membership,diff_set))
+          }
+    }
+    res <- rbind(res,c(ari[which.max(avg_silwidth)],"Single Dataset",level[i],"With","Taxa"))
+    res <- rbind(res,c(ari[which.max(avg_silwidth)],"Single Dataset",level[i],"Without","Taxa"))
+          
+  
+  
+    #######Metadict
+    alpha <- 1
+    beta <- 0.1
+    gamma <- 1
+    metadict_res <- metadict(O_list,alpha,beta,gamma,dist,meta.list)
+    D <- metadict_res$D
+    R <- do.call(cbind,metadict_res$R)
+    X <- metadict_res$X
+    
+    c_metadict <- community_detection(D[,1:50], K=10)$cluster
+    c_metadict_s <- community_detection(t(R),K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_metadict,diff_set),"MetaDICT",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_metadict_s,meta$Y),"MetaDICT",level[i],"With","Sample"))
+  
+    metadict_res1 <- metadict(O_list,alpha,beta,gamma,dist,meta.list1)
+    D1 <- metadict_res1$D
+    R1 <- do.call(cbind,metadict_res1$R)
+    X1 <- metadict_res1$X
+    c_metadict1 <- community_detection(D[,1:50], K=10)$cluster
+    c_metadict_s1 <- community_detection(t(R1),K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_metadict1,diff_set),"MetaDICT",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_metadict_s1,meta$Y),"MetaDICT",level[i],"Without","Sample"))
+  
+    
+    #######ComBatSeq
+    res_ComBatSeq <- sva::ComBat_seq(as.matrix(O),batchid, covar_mod = meta)
+    c_combatseq <- community_detection(res_ComBatSeq,K=10)$cluster
+    c_combatseq_s <- community_detection(t(res_ComBatSeq),K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_combatseq,diff_set),"ComBatSeq",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_combatseq_s,meta$Y),"ComBatSeq",level[i],"With","Sample"))
+  
+    res_ComBatSeq1 <- sva::ComBat_seq(as.matrix(O),batchid, covar_mod = meta1)
+    c_combatseq1 <- community_detection(res_ComBatSeq1,K=10)$cluster
+    c_combatseq_s1 <- community_detection(t(res_ComBatSeq1),K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_combatseq1,diff_set),"ComBatSeq",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_combatseq_s1,meta$Y),"ComBatSeq",level[i],"Without","Sample"))
+  
+  
+    ########MMUPHin
+    colnames(O) <- sapply(1:ncol(O),function(x)paste("Sample",x))
+    rownames(meta) <- sapply(1:ncol(O),function(x)paste("Sample",x))
+    meta$batch <- as.factor(batchid)
+    res_mmuphin <- adjust_batch(feature_abd = O,
+                                  batch = "batch",
+                                covariates = c("Y","Y2"),
+                                  data = meta)$feature_abd_adj
+    c_mmuphin <- community_detection(res_mmuphin,K=10)$cluster
+    c_mmuphin_s <- community_detection(t(res_mmuphin),K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_mmuphin,diff_set),"MMUPHin",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_mmuphin_s,meta$Y),"MMUPHin",level[i],"With","Sample"))
+  
+    
+    res_mmuphin1 <- adjust_batch(feature_abd = O,
+                                  batch = "batch",
+                                covariates = "Y2",
+                                  data = meta)$feature_abd_adj
+    c_mmuphin1 <- community_detection(res_mmuphin1,K=10)$cluster
+    c_mmuphin_s1 <- community_detection(t(res_mmuphin1),K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_mmuphin1,diff_set),"MMUPHin",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_mmuphin_s1,meta$Y),"MMUPHin",level[i],"Without","Sample"))
+    
+  
+    ###########ConQUR
+    tax_tab <- t(O)
+    res_conqur <- ConQuR(tax_tab,batchid,batch_ref = 1,covariates = meta[,-3])
+    c_conqur <- community_detection(t(res_conqur),K=10)$cluster
+    c_conqur_s <- community_detection(res_conqur,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_conqur,diff_set),"ConQuR",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_conqur_s,meta$Y),"ConQuR",level[i],"With","Sample"))
+  
+    res_conqur1 <- ConQuR(tax_tab,batchid,batch_ref = 1,covariates = meta1)
+    c_conqur1 <- community_detection(t(res_conqur1),K=10)$cluster
+    c_conqur_s1 <- community_detection(res_conqur1,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_conqur1,diff_set),"ConQuR",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_conqur_s1,meta$Y),"ConQuR",level[i],"Without","Sample"))
+    
+    
+    ###########Percentile
+    O_ref <- t(O)/colSums(O)
+    O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
+    colnames(O_ref) <- sapply(1:ncol(O_ref),function(i)paste0("Taxon",i))
+    rownames(O_ref) <- sapply(1:nrow(O_ref),function(i)paste0("Sample",i))
+    res_percentile <- percentile_norm(O_ref, batchid, meta$Y, "Group 1")
+    c_percentile <- community_detection(t(res_percentile),K=10)$cluster
+    c_percentile_s <- community_detection(res_percentile,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_percentile,diff_set),"Percentile",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_percentile_s,meta$Y),"Percentile",level[i],"With","Sample"))
+    
+    res_percentile1 <- percentile_norm(O_ref, batchid, meta$Y2, "Group 1")
+    c_percentile1 <- community_detection(t(res_percentile1),K=10)$cluster
+    c_percentile_s1 <- community_detection(res_percentile1,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_percentile1,diff_set),"Percentile-Norm",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_percentile_s1,meta$Y),"Percentile-Norm",level[i],"Without","Sample"))
+    
+    ###########PLSDA-batch
+    if(i == 1){
+      O.clr <- microbiome::transform(O, "clr")
+      res_plsda <- PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = batchid)$X.nobatch
+      c_plsda <- community_detection(t(res_plsda),K=10)$cluster
+      c_plsda_s <- community_detection(res_plsda,K=10)$cluster
+      res <- rbind(res,c(adjustedRandIndex(c_plsda,diff_set),"PLSDA-batch",level[i],"With","Taxa"))
+      res <- rbind(res,c(adjustedRandIndex(c_plsda_s,meta$Y),"PLSDA-batch",level[i],"With","Sample"))
+      
+      res_plsda1 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y2, Y.bat = batchid)$X.nobatch
+      c_plsda1 <- community_detection(t(res_plsda1),K=10)$cluster
+      c_plsda_s1 <- community_detection(res_plsda1,K=10)$cluster
+      res <- rbind(res,c(adjustedRandIndex(c_plsda1,diff_set),"PLSDA-batch",level[i],"Without","Taxa"))
+      res <- rbind(res,c(adjustedRandIndex(c_plsda_s1,meta$Y),"PLSDA-batch",level[i],"Without","Sample"))
+    }else{
+      O.clr <- microbiome::transform(O, "clr")
+      res_plsda <- PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = batchid, balance = F)$X.nobatch
+      c_plsda <- community_detection(t(res_plsda),K=10)$cluster
+      c_plsda_s <- community_detection(res_plsda,K=10)$cluster
+      res <- rbind(res,c(adjustedRandIndex(c_plsda,diff_set),"PLSDA-batch",level[i],"With","Taxa"))
+      res <- rbind(res,c(adjustedRandIndex(c_plsda_s,meta$Y),"PLSDA-batch",level[i],"With","Sample"))
+      
+      res_plsda1 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y2, Y.bat = batchid)$X.nobatch
+      c_plsda1 <- community_detection(t(res_plsda1),K=10)$cluster
+      c_plsda_s1 <- community_detection(res_plsda1,K=10)$cluster
+      res <- rbind(res,c(adjustedRandIndex(c_plsda1,diff_set),"PLSDA-batch",level[i],"Without","Taxa"))
+      res <- rbind(res,c(adjustedRandIndex(c_plsda_s1,meta$Y),"PLSDA-batch",level[i],"Without","Sample"))
+    }
+    
+    
+    
+    ###########DEBIASM
+    res_debiasm <- read.csv(paste0("../data/Simulation_data/fig4cd/res_debiasm/debias_",i,"_iter", iter, "_1.csv"), row.names = 1)
+    c_debiasm <- community_detection(t(res_debiasm),K=10)$cluster
+    c_debiasm_s <- community_detection(res_debiasm,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_debiasm,diff_set),"DEBIAS-M",level[i],"With","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_debiasm_s,meta$Y),"DEBIAS-M",level[i],"With","Sample"))
+    
+    res_debiasm1 <- read.csv(paste0("../data/Simulation_data/fig4cd/res_debiasm/debias_",i,"_iter", iter, "_2.csv"), row.names = 1)
+    c_debiasm1 <- community_detection(t(res_debiasm1),K=10)$cluster
+    c_debiasm_s1 <- community_detection(res_debiasm1,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_debiasm1,diff_set),"DEBIAS-M",level[i],"Without","Taxa"))
+    res <- rbind(res,c(adjustedRandIndex(c_debiasm_s1,meta$Y),"DEBIAS-M",level[i],"Without","Sample"))
+    
+    
+    
+    ###########scANVI
+    res_scanvi <- read.csv(paste0("../data/Simulation_data/fig4cd/res_scanvi/scanvi_",i,"_iter", iter, "_1.csv"), row.names = 1)
+    c_scanvi_s <- community_detection(res_scanvi,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_scanvi_s,meta$Y),"scANVI",level[i],"With","Sample"))
+    
+    res_scanvi1 <- read.csv(paste0("../data/Simulation_data/fig4cd/res_scanvi/scanvi_",i,"_iter", iter, "_2.csv"), row.names = 1)
+    c_scanvi_s1 <- community_detection(res_scanvi1,K=10)$cluster
+    res <- rbind(res,c(adjustedRandIndex(c_scanvi_s1,meta$Y),"scANVI",level[i],"Without","Sample"))
+  }
+  print(iter)
+}
+
+```
+
+
+## S9-10a-m
+
+
+
+```{r}
+n <- 50
+ez <- 50
+m.list <- c(2, 5, 7)
+```
+
+
+```{r}
+set.seed(2025)
+
+for (iter in 1:500) {
+  for (i in 1:3) {
+    m <- m.list[i]
+    data <- init_dataset(m, n, count, dist, k = 10, ez = ez)
+
+    O_list <- data[[1]]
+    w_list_t <- data[[2]]
+    X_t <- do.call(cbind, data[[3]])
+    meta.list <- data[[4]]
+    diff_set <- data[[5]]
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+    meta$batch <- as.factor(batchid)
+
+    O <- do.call(cbind, O_list)
+
+    write.csv(O, paste0("../data/Simulation_data/FigS10-m/count/count_", i, "_iter", iter, ".csv"))
+    write.csv(meta, paste0("../data/Simulation_data/FigS10-m/meta/meta_", i, "_iter", iter, ".csv"))
+    save(O_list, meta.list, diff_set, file = paste0("../data/Simulation_data/FigS10-m/rdata/rdata_", i, "_iter", iter, ".RData"))
+  }
+}
+
+```
+
+
+```{r}
+res <- data.frame("ARI" = numeric(), "Method" = character(), "m" = numeric(), "Type" = numeric())
+
+for (iter in 1:500) {
+  for (i in 1:3) {
+    m <- m.list[[i]]
+    load(paste0("../data/Simulation_data/FigS10-m/rdata/rdata_", i, "_iter", iter, ".RData"))
+
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+    O <- do.call(cbind, O_list)
+
+    ####### Unprocessed Data
+    res <- rbind(res, c(adjustedRandIndex(community_detection(O, K = 10)$cluster, diff_set), "Unprocessed", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(community_detection(t(O), K = 50)$cluster, meta$Y), "Unprocessed", m.list[i], "Sample"))
+
+    ####### Single Dataset
+    ari <- c()
+    avg_silwidth <- c()
+    for (j in 1:m) {
+      membership <- community_detection(O_list[[j]], K = 10)$cluster
+      if (length(unique(membership)) != 1) {
+        avg_silwidth <- c(avg_silwidth, mean(cluster::silhouette(membership, dist(O_list[[j]], method = "euclidean"))[, 3], na.rm = TRUE))
+        ari <- c(ari, adjustedRandIndex(membership, diff_set))
+      }
+    }
+    res <- rbind(res, c(ari[which.max(avg_silwidth)], "Single Dataset", m.list[i], "Taxa"))
+    res <- rbind(res, c(ari[which.max(avg_silwidth)], "Single Dataset", m.list[i], "Taxa"))
+
+    ####### MetaDICT
+    alpha <- 1
+    beta <- 0.1
+    gamma <- 1
+    metadict_res <- metadict(O_list, alpha, beta, gamma, dist, meta.list)
+    D <- metadict_res$D
+    R <- do.call(cbind, metadict_res$R)
+    X <- metadict_res$X
+    c_metadict <- community_detection(D[, 1:50], K = 10)$cluster
+    c_metadict_s <- community_detection(t(R), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_metadict, diff_set), "MetaDICT", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_metadict_s, meta$Y), "MetaDICT", m.list[i], "Sample"))
+
+    ####### ComBatSeq
+    res_ComBatSeq <- sva::ComBat_seq(as.matrix(O), batchid, covar_mod = meta)
+    c_combatseq <- community_detection(res_ComBatSeq, K = 10)$cluster
+    c_combatseq_s <- community_detection(t(res_ComBatSeq), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_combatseq, diff_set), "ComBatSeq", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_combatseq_s, meta$Y), "ComBatSeq", m.list[i], "Sample"))
+
+    ####### MMUPHin
+    colnames(O) <- sapply(1:ncol(O), function(x) paste("Sample", x))
+    rownames(meta) <- sapply(1:ncol(O), function(x) paste("Sample", x))
+    meta$batch <- as.factor(batchid)
+    res_mmuphin <- adjust_batch(feature_abd = O, batch = "batch", covariates = c("Y"), data = meta)$feature_abd_adj
+    c_mmuphin <- community_detection(res_mmuphin, K = 10)$cluster
+    c_mmuphin_s <- community_detection(t(res_mmuphin), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_mmuphin, diff_set), "MMUPHin", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_mmuphin_s, meta$Y), "MMUPHin", m.list[i], "Sample"))
+
+    ####### ConQuR
+    tax_tab <- t(O)
+    res_conqur <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta$Y)
+    c_conqur <- community_detection(t(res_conqur), K = 10)$cluster
+    c_conqur_s <- community_detection(res_conqur, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_conqur, diff_set), "ConQuR", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_conqur_s, meta$Y), "ConQuR", m.list[i], "Sample"))
+
+    ####### Percentile-Norm
+    O_ref <- t(O) / colSums(O)
+    O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 10^-6)
+    colnames(O_ref) <- sapply(1:ncol(O_ref), function(i) paste0("Taxon", i))
+    rownames(O_ref) <- sapply(1:nrow(O_ref), function(i) paste0("Sample", i))
+    res_percentile <- percentile_norm(O_ref, batchid, meta$Y, "Group 1")
+    c_percentile <- community_detection(t(res_percentile), K = 10)$cluster
+    c_percentile_s <- community_detection(res_percentile, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_percentile, diff_set), "Percentile-Norm", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_percentile_s, meta$Y), "Percentile-Norm", m.list[i], "Sample"))
+
+    ####### PLSDA-batch
+    O.clr <- microbiome::transform(O, "clr")
+    res_plsda <- PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = batchid)$X.nobatch
+    c_plsda <- community_detection(t(res_plsda), K = 10)$cluster
+    c_plsda_s <- community_detection(res_plsda, K = 10)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_plsda, diff_set), "PLSDA-batch", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_plsda_s, meta$Y), "PLSDA-batch", m.list[i], "Sample"))
+
+    ####### DEBIASM
+    res_debiasm <- read.csv(paste0("../data/Simulation_data/FigS10-m/res_debiasm/debias_", i, "_iter", iter, ".csv"), row.names = 1)
+    c_debiasm <- community_detection(t(res_debiasm), K = 10)$cluster
+    c_debiasm_s <- community_detection(res_debiasm, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_debiasm, diff_set), "DEBIAS-M", m.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_debiasm_s, meta$Y), "DEBIAS-M", m.list[i], "Sample"))
+
+    ####### scANVI
+    res_scanvi <- read.csv(paste0("../data/Simulation_data/FigS10-m/res_scanvi/scanvi_", i, "_iter", iter, ".csv"), row.names = 1)
+    c_scanvi_s <- community_detection(res_scanvi, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_scanvi_s, meta$Y), "scANVI", m.list[i], "Sample"))
+  }
+  print(iter)
+}
+
+```
+
+
+## S9-10b-signal
+
+```{r}
+m <- 5
+n <- 50
+ez <- 50
+ez.list <- c(30,50,70) # signal
+```
+
+```{r}
+set.seed(2025)
+
+for (iter in 1:500) {
+  for (i in 1:3) {
+    ez <- ez.list[i]
+    data <- init_dataset(m, n, count, dist, k = 10, ez = ez)
+
+    O_list <- data[[1]]
+    w_list_t <- data[[2]]
+    X_t <- do.call(cbind, data[[3]])
+    meta.list <- data[[4]]
+    diff_set <- data[[5]]
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+    meta$batch <- as.factor(batchid)
+
+    O <- do.call(cbind, O_list)
+
+    write.csv(O, paste0("../data/Simulation_data/FigS10-sig/count/count_", i, "_iter", iter, ".csv"))
+    write.csv(meta, paste0("../data/Simulation_data/FigS10-sig/meta/meta_", i, "_iter", iter, ".csv"))
+    save(O_list, meta.list, diff_set, file = paste0("../data/Simulation_data/FigS10-sig/rdata/rdata_", i, "_iter", iter, ".RData"))
+  }
+}
+
+```
+
+
+```{r}
+res <- data.frame("ARI" = numeric(), "Method" = character(), "Signal" = numeric(), "Type" = numeric())
+
+for (iter in 1:1) {
+  for (i in 1:3) {
+    ez <- ez.list[[i]]
+    load(paste0("../data/Simulation_data/FigS10-sig/rdata/rdata_", i, "_iter", iter, ".RData"))
+
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+    O <- do.call(cbind, O_list)
+
+    ####### Unprocessed Data
+    res <- rbind(res, c(adjustedRandIndex(community_detection(O, K = 10)$cluster, diff_set), "Unprocessed", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(community_detection(t(O), K = 50)$cluster, meta$Y), "Unprocessed", ez.list[i], "Sample"))
+
+    ####### Single Dataset
+    ari <- c()
+    avg_silwidth <- c()
+    for (j in 1:m) {
+      membership <- community_detection(O_list[[j]], K = 10)$cluster
+      if (length(unique(membership)) != 1) {
+        avg_silwidth <- c(avg_silwidth, mean(cluster::silhouette(membership, dist(O_list[[j]], method = "euclidean"))[, 3], na.rm = TRUE))
+        ari <- c(ari, adjustedRandIndex(membership, diff_set))
+      }
+    }
+    res <- rbind(res, c(ari[which.max(avg_silwidth)], "Single Dataset", ez.list[i], "Taxa"))
+    res <- rbind(res, c(ari[which.max(avg_silwidth)], "Single Dataset", ez.list[i], "Taxa"))
+
+    ####### MetaDICT
+    alpha <- 1
+    beta <- 0.1
+    gamma <- 1
+    metadict_res <- metadict(O_list, alpha, beta, gamma, dist, meta.list)
+    D <- metadict_res$D
+    R <- do.call(cbind, metadict_res$R)
+    X <- metadict_res$X
+    c_metadict <- community_detection(D[, 1:50], K = 10)$cluster
+    c_metadict_s <- community_detection(t(R), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_metadict, diff_set), "MetaDICT", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_metadict_s, meta$Y), "MetaDICT", ez.list[i], "Sample"))
+
+    ####### ComBatSeq
+    res_ComBatSeq <- sva::ComBat_seq(as.matrix(O), batchid, covar_mod = meta)
+    c_combatseq <- community_detection(res_ComBatSeq, K = 10)$cluster
+    c_combatseq_s <- community_detection(t(res_ComBatSeq), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_combatseq, diff_set), "ComBatSeq", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_combatseq_s, meta$Y), "ComBatSeq", ez.list[i], "Sample"))
+
+    ####### MMUPHin
+    colnames(O) <- sapply(1:ncol(O), function(x) paste("Sample", x))
+    rownames(meta) <- sapply(1:ncol(O), function(x) paste("Sample", x))
+    meta$batch <- as.factor(batchid)
+    res_mmuphin <- adjust_batch(feature_abd = O, batch = "batch", covariates = c("Y"), data = meta)$feature_abd_adj
+    c_mmuphin <- community_detection(res_mmuphin, K = 10)$cluster
+    c_mmuphin_s <- community_detection(t(res_mmuphin), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_mmuphin, diff_set), "MMUPHin", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_mmuphin_s, meta$Y), "MMUPHin", ez.list[i], "Sample"))
+
+    ####### ConQuR
+    tax_tab <- t(O)
+    res_conqur <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta$Y)
+    c_conqur <- community_detection(t(res_conqur), K = 10)$cluster
+    c_conqur_s <- community_detection(res_conqur, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_conqur, diff_set), "ConQuR", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_conqur_s, meta$Y), "ConQuR", ez.list[i], "Sample"))
+
+    ####### Percentile-Norm
+    O_ref <- t(O) / colSums(O)
+    O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 10^-6)
+    colnames(O_ref) <- sapply(1:ncol(O_ref), function(i) paste0("Taxon", i))
+    rownames(O_ref) <- sapply(1:nrow(O_ref), function(i) paste0("Sample", i))
+    res_percentile <- percentile_norm(O_ref, batchid, meta$Y, "Group 1")
+    c_percentile <- community_detection(t(res_percentile), K = 10)$cluster
+    c_percentile_s <- community_detection(res_percentile, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_percentile, diff_set), "Percentile-Norm", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_percentile_s, meta$Y), "Percentile-Norm", ez.list[i], "Sample"))
+
+    ####### PLSDA
+    O.clr <- microbiome::transform(O, "clr")
+    res_plsda <- PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = batchid, balance = FALSE)$X.nobatch
+    c_plsda <- community_detection(t(res_plsda), K = 10)$cluster
+    c_plsda_s <- community_detection(res_plsda, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_plsda, diff_set), "PLSDA-batch", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_plsda_s, meta$Y), "PLSDA-batch", ez.list[i], "Sample"))
+
+    ####### DEBIASM
+    res_debiasm <- read.csv(paste0("../data/Simulation_data/FigS10-sig/res_debiasm/debias_", i, "_iter", iter, ".csv"), row.names = 1)
+    c_debiasm <- community_detection(t(res_debiasm), K = 10)$cluster
+    c_debiasm_s <- community_detection(res_debiasm, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_debiasm, diff_set), "DEBIAS-M", ez.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_debiasm_s, meta$Y), "DEBIAS-M", ez.list[i], "Sample"))
+
+    ####### scANVI
+    res_scanvi <- read.csv(paste0("../data/Simulation_data/FigS10-sig/res_scanvi/scanvi_", i, "_iter", iter, ".csv"), row.names = 1)
+    c_scanvi_s <- community_detection(res_scanvi, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_scanvi_s, meta$Y), "scANVI", ez.list[i], "Sample"))
+  }
+  print(iter)
+}
+
+```
+
+## S9-10(c)-n
+
+```{r}
+m <- 5
+ez <- 50
+n.list <- c(25,50,100)
+```
+
+```{r}
+set.seed(2025)
+
+for (iter in 1:500) {
+  for (i in 1:3) {
+    n <- n.list[i]
+    data <- init_dataset(m, n, count, dist, k = 10, ez = ez)
+
+    O_list <- data[[1]]
+    w_list_t <- data[[2]]
+    X_t <- do.call(cbind, data[[3]])
+    meta.list <- data[[4]]
+    diff_set <- data[[5]]
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+    meta$batch <- as.factor(batchid)
+
+    O <- do.call(cbind, O_list)
+
+    write.csv(O, paste0("../data/Simulation_data/FigS10-n/count/count_", i, "_iter", iter, ".csv"))
+    write.csv(meta, paste0("../data/Simulation_data/FigS10-n/meta/meta_", i, "_iter", iter, ".csv"))
+    save(O_list, meta.list, diff_set, file = paste0("../data/Simulation_data/FigS10-n/rdata/rdata_", i, "_iter", iter, ".RData"))
+  }
+}
+
+```
+
+
+```{r}
+res <- data.frame("ARI" = numeric(), "Method" = character(), "n" = numeric(), "Type" = numeric())
+
+for (iter in 1:500) {
+  for (i in 1:3) {
+    n <- n.list[[i]]
+    load(paste0("../data/Simulation_data/FigS10-m/rdata/rdata_", i, "_iter", iter, ".RData"))
+
+    meta <- do.call("rbind", meta.list)
+    meta$Y <- as.factor(meta$Y)
+
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+    O <- do.call(cbind, O_list)
+
+    ####### Unprocessed Data
+    res <- rbind(res, c(adjustedRandIndex(community_detection(O, K = 10)$cluster, diff_set), "Unprocessed", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(community_detection(t(O), K = 50)$cluster, meta$Y), "Unprocessed", n.list[i], "Sample"))
+
+    ####### Single Dataset
+    ari <- c()
+    avg_silwidth <- c()
+    for (j in 1:m) {
+      membership <- community_detection(O_list[[j]], K = 10)$cluster
+      if (length(unique(membership)) != 1) {
+        avg_silwidth <- c(avg_silwidth, mean(cluster::silhouette(membership, dist(O_list[[j]], method = "euclidean"))[, 3], na.rm = TRUE))
+        ari <- c(ari, adjustedRandIndex(membership, diff_set))
+      }
+    }
+    res <- rbind(res, c(ari[which.max(avg_silwidth)], "Single Dataset", n.list[i], "Taxa"))
+    res <- rbind(res, c(ari[which.max(avg_silwidth)], "Single Dataset", n.list[i], "Taxa"))
+
+    ####### MetaDICT
+    alpha <- 1
+    beta <- 0.1
+    gamma <- 1
+    metadict_res <- metadict(O_list, alpha, beta, gamma, dist, meta.list)
+    D <- metadict_res$D
+    R <- do.call(cbind, metadict_res$R)
+    X <- metadict_res$X
+    c_metadict <- community_detection(D[, 1:50], K = 10)$cluster
+    c_metadict_s <- community_detection(t(R), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_metadict, diff_set), "MetaDICT", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_metadict_s, meta$Y), "MetaDICT", n.list[i], "Sample"))
+
+    ####### ComBatSeq
+    res_ComBatSeq <- sva::ComBat_seq(as.matrix(O), batchid, covar_mod = meta)
+    c_combatseq <- community_detection(res_ComBatSeq, K = 10)$cluster
+    c_combatseq_s <- community_detection(t(res_ComBatSeq), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_combatseq, diff_set), "ComBatSeq", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_combatseq_s, meta$Y), "ComBatSeq", n.list[i], "Sample"))
+
+    ####### MMUPHin
+    colnames(O) <- sapply(1:ncol(O), function(x) paste("Sample", x))
+    rownames(meta) <- sapply(1:ncol(O), function(x) paste("Sample", x))
+    meta$batch <- as.factor(batchid)
+    res_mmuphin <- adjust_batch(feature_abd = O, batch = "batch", covariates = c("Y"), data = meta)$feature_abd_adj
+    c_mmuphin <- community_detection(res_mmuphin, K = 10)$cluster
+    c_mmuphin_s <- community_detection(t(res_mmuphin), K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_mmuphin, diff_set), "MMUPHin", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_mmuphin_s, meta$Y), "MMUPHin", n.list[i], "Sample"))
+
+    ####### ConQuR
+    tax_tab <- t(O)
+    res_conqur <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta$Y)
+    c_conqur <- community_detection(t(res_conqur), K = 10)$cluster
+    c_conqur_s <- community_detection(res_conqur, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_conqur, diff_set), "ConQuR", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_conqur_s, meta$Y), "ConQuR", n.list[i], "Sample"))
+
+    ####### Percentile-Norm
+    O_ref <- t(O) / colSums(O)
+    O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 10^-6)
+    colnames(O_ref) <- sapply(1:ncol(O_ref), function(i) paste0("Taxon", i))
+    rownames(O_ref) <- sapply(1:nrow(O_ref), function(i) paste0("Sample", i))
+    res_percentile <- percentile_norm(O_ref, batchid, meta$Y, "Group 1")
+    c_percentile <- community_detection(t(res_percentile), K = 10)$cluster
+    c_percentile_s <- community_detection(res_percentile, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_percentile, diff_set), "Percentile-Norm", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_percentile_s, meta$Y), "Percentile-Norm", n.list[i], "Sample"))
+
+    ####### PLSDA-batch
+    O.clr <- microbiome::transform(O, "clr")
+    res_plsda <- PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = batchid)$X.nobatch
+    c_plsda <- community_detection(t(res_plsda), K = 10)$cluster
+    c_plsda_s <- community_detection(res_plsda, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_plsda, diff_set), "PLSDA-batch", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_plsda_s, meta$Y), "PLSDA-batch", n.list[i], "Sample"))
+
+    ####### DEBIASM
+    res_debiasm <- read.csv(paste0("../data/Simulation_data/FigS10-m/res_debiasm/debias_", i, "_iter", iter, ".csv"), row.names = 1)
+    c_debiasm <- community_detection(t(res_debiasm), K = 10)$cluster
+    c_debiasm_s <- community_detection(res_debiasm, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_debiasm, diff_set), "DEBIAS-M", n.list[i], "Taxa"))
+    res <- rbind(res, c(adjustedRandIndex(c_debiasm_s, meta$Y), "DEBIAS-M", n.list[i], "Sample"))
+
+    ####### scANVI
+    res_scanvi <- read.csv(paste0("../data/Simulation_data/FigS10-m/res_scanvi/scanvi_", i, "_iter", iter, ".csv"), row.names = 1)
+    c_scanvi_s <- community_detection(res_scanvi, K = 50)$cluster
+    res <- rbind(res, c(adjustedRandIndex(c_scanvi_s, meta$Y), "scANVI", n.list[i], "Sample"))
+  }
+  print(iter)
+}
+
+```

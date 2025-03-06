@@ -1,4 +1,5 @@
 ```{r}
+# Process He's data for simulations
 library(biomformat)
 library(stringr)
 library(ape)
@@ -6,6 +7,7 @@ library(qiime2R)
 library(phyloseq)
 library(dplyr)
 ```
+
 
 ```{r}
 # data preprocessing
@@ -54,6 +56,7 @@ drop_tips <- tree$tip.label[!(tree$tip.label %in% colnames(A))]
 tree <- ape::drop.tip(tree,drop_tips) %>% ape::as.phylo()
 ```
 
+
 ```{r}
 ## taxonomy
 taxonomy = read_qza(paste(filepath,"/","taxonomy.qza", sep = ""))$data
@@ -87,12 +90,12 @@ TAXA = tax_table(as.matrix(tax))
 physeq = phyloseq(OTU,TAXA,META, PHYLO)
 ```
 
-
 ```{r}
 ## aggregate taxa into order level
 phy.order = tax_glom(physeq,taxrank = "order")
 count.order = otu_table(phy.order)@.Data
 dist_order = cophenetic.phylo(phy.order@phy_tree)
+
 write.csv(as.matrix(dist_order),file = "../data/dist_order.csv")
 write.csv(t(count.order),file = '../data/count_order.csv')
 ```

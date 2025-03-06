@@ -1,0 +1,470 @@
+```{r}
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(pROC)
+library(PLSDAbatch)
+library(caret)
+source("./function.R")
+```
+
+```{r}
+# load data
+count <- read.csv("../data/count_order.csv")
+count <- count[,-1]
+
+dist <- read.csv("../data/dist_order.csv")
+dist <- as.matrix(dist[,-1])
+```
+
+
+```{r}
+# generate dataset
+init_dataset <- function(m, n, count, dist,k, k1, k3=100, k4=30, ez=4,lib_var=T,p = c(1/2,1/2,1/2,1/2,1/2)){
+  d <- nrow(count)
+  
+  # Initialize output containers
+  O_list <- list()
+  w_list <- list()
+  X_list <- list()
+  meta_list <- list()
+  meta_list1 <- list()
+  
+  # Calculate taxon prevalence and select differential taxa from those are prevalent
+  prevalence <- rowSums(count!=0)
+  diff_idx <- order(prevalence,decreasing = T)[k:1]
+
+  # Laplacian matrix
+  A <- exp(-dist/0.1)
+  L <- diag(colSums(A))-A
+  svd_res <- svd(L)
+  U <- svd_res$u
+  U <- U[,(ncol(U)-k3):(ncol(U))]
+  
+  for(i in 1:m){
+    # sample dataset basis
+    idx <- sample(ncol(count),n)
+    X <- as.matrix(count[,idx])
+    
+    # simulate sample condition
+    Y <- sample(0:1,n,T,prob = c(p[i],1-p[i]))
+    
+    # adjust microbial loads
+    X[diff_idx,which(Y==0)] <- (X[diff_idx,which(Y==0)]+1)*ez
+    
+    # simulate measurement efficiency
+    index <- sample(k3,k4)
+    w_space <- U[,index]
+    weight <- 1-2*runif(k4)
+    w <- (w_space%*%as.matrix(weight))[,1]
+    w <- (w-min(w)+1e-3)
+    w <- w/max(w)
+    w <- w/mean(w)*0.5
+
+    # simulate sequencing depth variation
+    if(lib_var){
+      if(i%%2==1){
+        X_lib <- X%*%diag(sample(1:5,n,replace = T))
+      }else{
+        X_lib <- X
+        }
+    }else{
+      X_lib <- X
+    }
+    
+    # simulate uninformative label
+    Y_f <- as.factor(rbinom(n,1,0.5))
+    
+    # output
+    O_list[i] <- list(floor(diag(w)%*%X_lib))
+    w_list[i] <- list(w)
+    X_list[i] <- list(floor(X))
+    meta_list[[i]] <- data.frame("Y" = as.factor(Y))
+    meta_list1[[i]] <- data.frame("Y" = as.factor(Y_f))
+  }
+  
+  return(list(O_list, w_list, X_list, diff_idx, meta_list, meta_list1))
+}
+```
+
+# experiment when condition is independent with batches
+
+```{r}
+# number of dataset
+m <- 2
+# sample number per dataset
+n <- 100
+# sample condition probability
+p <- c(1/2,1/2)
+# effect size
+ez <- 4 
+# taxa number
+d <- nrow(count)
+
+# MetaDICT parameters
+alpha <- 0.01
+beta <- 0.01
+gamma <- 1
+
+# batch id
+batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+```
+
+```{r}
+set.seed(2025)
+for(iter in 1:500){
+    data <- init_dataset(m,n,count,dist,floor(0.05*d),floor(0.05*d),ez=ez,p=p)
+    O_list <- data[[1]]
+    meta_list <- data[[5]]
+    meta_list1 <- data[[6]]
+    meta <- do.call("rbind",meta_list)
+    meta1 <- do.call("rbind",meta_list1)
+    O <- do.call(cbind,O_list)
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+    meta$batch <- batchid
+    meta1$batch <- batchid
+    meta$Y2 <- meta1$Y
+
+    rownames(meta1) <- rownames(meta) <- colnames(O) <- paste("Sample", 1:ncol(O))
+    rownames(O) = paste("Taxon", 1:nrow(O))
+
+    write.csv(O,paste0("../data/Simulation_data/fig5ef/count/count_iter",iter,".csv"))
+    write.csv(meta,paste0("../data/Simulation_data/fig5ef/meta/meta_iter",iter,".csv"))
+    save(O,meta,meta1,O_list,meta_list,meta_list1,file = paste0("../data/Simulation_data/fig5ef/rdata/rdata_iter",iter,".RData"))
+}
+```
+
+```{r}
+# prediction function
+knn_pred <- function(train,test,Y_train,Y_test){
+  test_pred <- class::knn(train = t(train), test = t(test), cl = Y_train, k=25)
+  actual <- Y_test
+  roc_object <- roc(actual,as.numeric(test_pred))
+  return(auc(roc_object))
+}
+
+RF_pred <- function(train,test,trainy,testy){
+  control <- trainControl(method = "cv",          # Cross-validation
+                          number = 5,             # Number of folds
+                          summaryFunction = twoClassSummary,  # For ROC
+                          classProbs = TRUE)       # Enable probabilities for ROC
+  dataset <- data.frame(trainy,t(train))
+  rf <- train(trainy~., data=dataset, 
+                  method="rf", 
+                  metric='ROC',
+                  trControl=control,
+                  ntree = 500)
+  # ensure names are matched
+  rownames(test) <- colnames(dataset)[-1]
+  test_pred <- predict(rf, newdata = t(test))
+  actual <- testy
+  roc_object <- roc(actual,as.numeric(test_pred))
+  return(auc(roc_object))
+}
+```
+
+```{r}
+# helper function
+ref_convert = function(O){
+  O_ref = t(O)/colSums(O)
+  O_ref[O_ref==0] = runif(sum(O_ref==0),0,10-6)
+  colnames(O_ref) = rownames(O)
+  rownames(O_ref) = colnames(O)
+  return(O_ref)
+}
+# Prediction and table updating function
+update_table <- function(table, model, data, labels, method, variant, control, extra) {
+  if(model == "Random Forest"){
+    pred <- RF_pred(data$train, data$test, labels$train, labels$test)
+  }else if(model == "K-NN"){
+    pred <- knn_pred(data$train, data$test, labels$train, labels$test)
+  }
+  rbind(table, c(pred, model, control, method, variant, extra))
+}
+  
+  
+# Apply batch correction methods
+methods <- list(
+  ConQuR = function(O, meta) t(ConQuR(t(O), batchid, batch_ref = 2, covariates = meta$Y)),
+  ComBatSeq = function(O, meta) sva::ComBat_seq(as.matrix(O), batchid, group = meta$Y),
+  MMUPHin = function(O, meta) adjust_batch(feature_abd = O, batch = "batch", covariates = "Y", data = meta)$feature_abd_adj,
+  PLSDA = function(O, meta) t(PLSDA_batch(t(microbiome::transform(O, "clr")), meta$Y, batchid)$X.nobatch),
+  Percentile = function(O,meta)t(percentile_norm(ref_convert(O), batchid, meta$Y, 1))
+)
+```
+
+
+## transfer learning
+
+```{r, warning=F}
+table <- c()
+for(iter in 1:500){
+  load(paste0("../data/Simulation_data/fig5ef/rdata/rdata_iter",iter,".RData"))
+  
+  Y <- factor(meta$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+  Y_f <- factor(meta1$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+
+  # Split indices for training and testing
+  split.ind = c(1:n)  
+  train_test_split <- function(data, split.ind) list(train = data[,split.ind], test = data[,-split.ind])
+  Y_split <- list(train = Y[split.ind],test = Y[-split.ind])
+  Y_f_split <- list(train = Y_f[split.ind],test = Y_f[-split.ind])
+  
+  res.metadict <- metadict(O_list, alpha, beta, gamma, dist, meta_list)
+  X <- res.metadict$X
+  res.metadict1 <- metadict(O_list, alpha, beta, gamma, dist, meta_list1)
+  X1 <- res.metadict1$X
+  
+  batch_corrected <- lapply(methods, function(f) list(with = f(O, meta), without = f(O, meta1)))
+  batch_corrected$MetaDICT <- list(with = X, without = X1)
+  
+  res.debiasm1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_1.csv"),row.names = 1)
+  res.debiasm2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_2.csv"),row.names = 1)
+  batch_corrected$DEBIASM <- list(with = t(res.debiasm1), without = t(res.debiasm2))
+  
+  res.scanvi1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_1.csv"),row.names = 1)
+  res.scanvi2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_2.csv"),row.names = 1)
+  batch_corrected$scANVI <- list(with = t(res.scanvi1), without = t(res.scanvi2))
+ 
+  
+  controls <- c("Sample")
+  
+  # Add predictions for all methods and control cases
+  for (method_name in names(batch_corrected)) {
+    for (variant in c("with", "without")) {
+      for (control in controls) {
+        label_set <- if (control == "Sample") Y_split else Y_f_split
+        table <- update_table(
+          table, "Random Forest", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+          label_set, method_name, variant, control, ez
+        )
+      }
+    }
+  }
+  
+  # Add K-NN predictions
+  for (method_name in names(batch_corrected)) {
+    for (variant in c("with", "without")) {
+      for (control in controls) {
+        label_set <- if (control == "Sample") Y_split else Y_f_split
+        table <- update_table(
+          table, "K-NN", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+          label_set, method_name, variant, control, ez
+        )
+      }
+    }
+  }
+  
+  # Add predictions for the unprocessed data
+  for (control in controls) {
+    label_set <- if (control == "Sample") Y_split else Y_f_split
+    table <- update_table(
+      table, "Random Forest", train_test_split(O, split.ind),
+      label_set, "Unprocessed", "with", control, ez
+    )
+    table <- update_table(
+      table, "K-NN", train_test_split(O, split.ind),
+      label_set, "Unprocessed", "with", control, ez
+    )
+  }
+  print(iter)
+}
+pred1 <- as.data.frame(table)
+colnames(pred1) <- c("Accuracy","Algorithm","Type","Method","Covariate","Signal")
+
+write.csv(pred1,file = "../result/pred_sim1_balanced.csv")
+```
+
+## integrated prediction
+
+```{r}
+table <- c()
+for(iter in 1:500){
+  load(paste0("../data/Simulation_data/fig5ef/rdata/rdata_iter",iter,".RData"))
+  
+  Y <- factor(meta$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+  Y_f <- factor(meta1$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+
+  # Split indices for training and testing
+  split.ind <- sample(1:ncol(O), floor(0.75 * ncol(O)))
+  train_test_split <- function(data, split.ind) list(train = data[,split.ind], test = data[,-split.ind])
+  Y_split <- list(train = Y[split.ind],test = Y[-split.ind])
+  Y_f_split <- list(train = Y_f[split.ind],test = Y_f[-split.ind])
+  
+  res.metadict <- metadict(O_list, alpha, beta, gamma, dist, meta_list)
+  X <- res.metadict$X
+  res.metadict1 <- metadict(O_list, alpha, beta, gamma, dist, meta_list1)
+  X1 <- res.metadict1$X
+  
+  batch_corrected <- lapply(methods, function(f) list(with = f(O, meta), without = f(O, meta1)))
+  batch_corrected$MetaDICT <- list(with = X, without = X1)
+  
+  res.debiasm1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_1.csv"),row.names = 1)
+  res.debiasm2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_2.csv"),row.names = 1)
+  batch_corrected$DEBIASM <- list(with = t(res.debiasm1), without = t(res.debiasm2))
+  
+  res.scanvi1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_1.csv"),row.names = 1)
+  res.scanvi2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_2.csv"),row.names = 1)
+  batch_corrected$scANVI <- list(with = t(res.scanvi1), without = t(res.scanvi2))
+ 
+  
+  controls <- c("Sample", "Negative Control")
+  
+  # Add predictions for all methods and control cases
+  for (method_name in names(batch_corrected)) {
+    for (variant in c("with", "without")) {
+      for (control in controls) {
+        label_set <- if (control == "Sample") Y_split else Y_f_split
+        table <- update_table(
+          table, "Random Forest", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+          label_set, method_name, variant, control, ez
+        )
+      }
+    }
+  }
+  
+  # Add K-NN predictions
+  for (method_name in names(batch_corrected)) {
+    for (variant in c("with", "without")) {
+      for (control in controls) {
+        label_set <- if (control == "Sample") Y_split else Y_f_split
+        table <- update_table(
+          table, "K-NN", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+          label_set, method_name, variant, control, ez
+        )
+      }
+    }
+  }
+  
+  # Add predictions for the unprocessed data
+  for (control in controls) {
+    label_set <- if (control == "Sample") Y_split else Y_f_split
+    table <- update_table(
+      table, "Random Forest", train_test_split(O, split.ind),
+      label_set, "Unprocessed", "with", control, ez
+    )
+    table <- update_table(
+      table, "K-NN", train_test_split(O, split.ind),
+      label_set, "Unprocessed", "with", control, ez
+    )
+  }
+  print(iter)
+}
+pred <- as.data.frame(table)
+colnames(pred) <- c("Accuracy","Algorithm","Type","Method","Covariate","Signal")
+write.csv(pred, file = "../result/pred_sim1.csv")
+```
+
+# experiment when condition is confounded with batches
+
+```{r}
+set.seed(2025)
+for(iter in 1:500){
+    data <- init_dataset(m,n,count,dist,floor(0.05*d),floor(0.05*d),ez=ez,p=c(1/4,1/6))
+    O_list <- data[[1]]
+    meta_list <- data[[5]]
+    meta_list1 <- data[[6]]
+    meta <- do.call("rbind",meta_list)
+    meta1 <- do.call("rbind",meta_list1)
+    O <- do.call(cbind,O_list)
+    batchid <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+    meta$batch <- batchid
+    meta1$batch <- batchid
+    meta$Y2 <- meta1$Y
+
+    rownames(meta1) <- rownames(meta) <- colnames(O) <- paste("Sample", 1:ncol(O))
+    rownames(O) <- paste("Taxon", 1:nrow(O))
+
+    write.csv(O,paste0("../data/Simulation_data/fig5d/count/count_iter",iter,".csv"))
+    write.csv(meta,paste0("../data/Simulation_data/fig5d/meta/meta_iter",iter,".csv"))
+    save(O,meta,meta1,O_list,meta_list,meta_list1,file = paste0("../data/Simulation_data/fig5d/rdata/rdata_iter",iter,".RData"))
+}
+```
+
+```{r, warning=F}
+table <- c()
+for(iter in 1:500){
+  load(paste0("../data/Simulation_data/fig5d/rdata/rdata_iter",iter,".RData"))
+  
+  Y <- factor(meta$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+  Y_f <- factor(meta1$Y, levels = c(0, 1), labels = c("Class0", "Class1"))
+
+  # Split indices for training and testing
+  split.ind = c(1:n)  
+  train_test_split <- function(data, split.ind) list(train = data[,-split.ind], test = data[,split.ind])
+  Y_split <- list(train = Y[-split.ind],test = Y[split.ind])
+  Y_f_split <- list(train = Y_f[-split.ind],test = Y_f[split.ind])
+  
+  res.metadict <- metadict(O_list, alpha, beta, gamma, dist, meta_list)
+  X <- res.metadict$X
+  res.metadict1 <- metadict(O_list, alpha, beta, gamma, dist, meta_list1)
+  X1 <- res.metadict1$X
+  
+  
+ 
+  res.plsda = t(PLSDA_batch(t(microbiome::transform(O, "clr")),meta$Y,batchid, balance = F)$X.nobatch)
+  res.plsda1 = t(PLSDA_batch(t(microbiome::transform(O, "clr")),meta1$Y,batchid)$X.nobatch)
+  
+  
+  
+  batch_corrected <- lapply(methods, function(f) list(with = f(O, meta), without = f(O, meta1)))
+  batch_corrected$MetaDICT <- list(with = X, without = X1)
+  batch_corrected$PLSDA <- list(with = res.plsda, without = res.plsda1)
+  
+  res.debiasm1 <- read.csv(paste0("../data/Simulation_data/fig5d/res_debiasm/debias_iter",iter,"_1.csv"),row.names = 1)
+  res.debiasm2 <- read.csv(paste0("../data/Simulation_data/fig5d/res_debiasm/debias_iter",iter,"_2.csv"),row.names = 1)
+  batch_corrected$DEBIASM <- list(with = t(res.debiasm1), without = t(res.debiasm2))
+  
+  res.scanvi1 <- read.csv(paste0("../data/Simulation_data/fig5d/res_scanvi/scanvi_iter",iter,"_1.csv"),row.names = 1)
+  res.scanvi2 <- read.csv(paste0("../data/Simulation_data/fig5d/res_scanvi/scanvi_iter",iter,"_2.csv"),row.names = 1)
+  batch_corrected$scANVI <- list(with = t(res.scanvi1), without = t(res.scanvi2))
+ 
+  
+  controls <- c("Sample")
+  
+  # Add predictions for all methods and control cases
+  for (method_name in names(batch_corrected)) {
+    for (variant in c("with", "without")) {
+      for (control in controls) {
+        label_set <- if (control == "Sample") Y_split else Y_f_split
+        table <- update_table(
+          table, "Random Forest", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+          label_set, method_name, variant, control, ez
+        )
+      }
+    }
+  }
+  
+  # Add K-NN predictions
+  for (method_name in names(batch_corrected)) {
+    for (variant in c("with", "without")) {
+      for (control in controls) {
+        label_set <- if (control == "Sample") Y_split else Y_f_split
+        table <- update_table(
+          table, "K-NN", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+          label_set, method_name, variant, control, ez
+        )
+      }
+    }
+  }
+  
+  # Add predictions for the unprocessed data
+  for (control in controls) {
+    label_set <- if (control == "Sample") Y_split else Y_f_split
+    table <- update_table(
+      table, "Random Forest", train_test_split(O, split.ind),
+      label_set, "Unprocessed", "with", control, ez
+    )
+    table <- update_table(
+      table, "K-NN", train_test_split(O, split.ind),
+      label_set, "Unprocessed", "with", control, ez
+    )
+  }
+  print(iter)
+}
+
+pred2 <- as.data.frame(table)
+colnames(pred2) <- c("Accuracy","Algorithm","Type","Method","Covariate","Signal")
+
+write.csv(pred2, "../result/pred_sim2_unblanced.csv")
+```

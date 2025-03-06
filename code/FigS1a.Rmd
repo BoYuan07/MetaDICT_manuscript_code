@@ -7,208 +7,209 @@ library(ggplot2)
 
 ```{r}
 # load order level data
-count = read.csv("../data/count_order.csv")
-count = count[,-1]
+count <- read.csv("../data/count_order.csv")
+count <- count[,-1]
 
-dist = read.csv("../data/dist_order.csv")
-dist = as.matrix(dist[,-1])
+dist <- read.csv("../data/dist_order.csv")
+dist <- as.matrix(dist[,-1])
 ```
 
 
 ```{r}
-init_dataset_acc_sim = function(m,n,count,dist,k,neighbor = 5, sigma = 1){
-  d = nrow(count)
-  O_list = list()
-  X_list = list()
+init_dataset_acc_sim <- function(m, n, count, dist, k, neighbor = 5, sigma = 1) {
+  d <- nrow(count)
+  O_list <- list()
+  X_list <- list()
   
-  A = matrix(0,d,d)
-  for(i in 1:d){
-    idx = order(dist[i,],decreasing = F)[2:(neighbor+1)]
-    A[i,idx] = exp(-dist[i,idx]/sigma)
-    A[idx,i] = exp(-dist[i,idx]/sigma)
+  A <- matrix(0, d, d)
+  for (i in 1:d) {
+    idx <- order(dist[i, ], decreasing = F)[2:(neighbor + 1)]
+    A[i, idx] <- exp(-dist[i, idx] / sigma)
+    A[idx, i] <- exp(-dist[i, idx] / sigma)
   }
-  D1 = diag(rowSums(A))
-  L = D1-A
-  svd_res = svd(L)
-  U = svd_res$u
-  U = U[,(ncol(U)-k+1):(ncol(U))]
+  D1 <- diag(rowSums(A))
+  L <- D1 - A
+  svd_res <- svd(L)
+  U <- svd_res$u
+  U <- U[, (ncol(U) - k + 1):ncol(U)]
 
+  w_list <- matrix(0, m, d)
   
-  w_list = matrix(0,m,d)
-  
-  for(i in 1:m){
-    idx1 = sample(ncol(count),n)
-    X0 = as.matrix(count[,idx1])
-    X = sapply(1:n,function(j)rdirichlet(X0[,j]+0.5))
-    X_lib = X%*%diag(sample(1e4:1e8,n,replace = T))
+  for (i in 1:m) {
+    idx1 <- sample(ncol(count), n)
+    X0 <- as.matrix(count[, idx1])
+    X <- sapply(1:n, function(j) rdirichlet(X0[, j] + 0.5))
+    X_lib <- X %*% diag(sample(1e4:1e8, n, replace = T))
     
+    w_space <- U
+    weight <- 1 - 2 * runif(k)
     
-    w_space = U
-    weight = 1-2*runif(k)
+    w <- (w_space %*% as.matrix(weight))[, 1]
+    w <- (w - min(w) + 0.05)
+    w <- w / max(w)
     
-    w = (w_space%*%as.matrix(weight))[,1]
-    w = (w-min(w)+0.05)
-    w = w/max(w)
-    
-    
-    O_list[i] = list(diag(w)%*%X_lib)
-    w_list[i,] = w
-    X_list[i] = list(X)
+    O_list[i] <- list(diag(w) %*% X_lib)
+    w_list[i, ] <- w
+    X_list[i] <- list(X)
   }
   return(list(O_list, w_list, X_list))
 }
 ```
 
-
 ```{r}
 set.seed(2)
-m = 4
-n = 100
-alpha = 0.01
-gamma = 10
-k = 1
-beta = 0
+m <- 4
+n <- 100
+alpha <- 0.01
+gamma <- 10
+k <- 1
+beta <- 0
 
-data1 = init_dataset_acc_sim(m,n,count,dist,k=10)
-w_list_t = data1[[2]]
-O_list = data1[[1]]
-metadict_res = metadict(O_list,alpha,beta,gamma,dist,meta.list=NULL,neighbor=5,sigma=1000)
-w_list = metadict_res$w
+data1 <- init_dataset_acc_sim(m,n,count,dist,k=10)
+w_list_t <- data1[[2]]
+O_list <- data1[[1]]
+metadict_res <- metadict(O_list,alpha,beta,gamma,dist,meta.list=NULL,neighbor=5,sigma=1000)
+w_list <- metadict_res$w
 
-
-w_all = c(w_list)
-w_all_t = c(w_list_t)
+w_all <- c(w_list)
+w_all_t <- c(w_list_t)
 print(mean(cor(w_all,w_all_t)))
 ```
 
-
-
 ```{r}
-d = nrow(count)
-p.list = list()
+d <- nrow(count)
+p.list <- list()
 for(i in 1:m){
-  taxon_sum = rowSums(O_list[[i]])
-  w_est_t = as.data.frame(matrix(0,nrow=d,ncol = 3))
-  w_est_t[,1] = w_list_t[i,]
-  w_est_t[,2] = paste("Dataset",i)
-  w_est_t[,3] = "Truth"
-  w_est_t[,4] = taxon_sum/max(taxon_sum)
-  w_est_e = as.data.frame(matrix(0,nrow=d,ncol = 3))
-  w_est_e[,1] = w_list[i,]/mean(w_list[i,])*mean(w_list_t[i,])
-  w_est_e[,2] = paste("Dataset",i)
-  w_est_e[,3] = "Estimation"
-  w_est_e[,4] = taxon_sum/max(taxon_sum)
-  w_est_all = rbind(w_est_t,w_est_e)
-  w_est_all$index = rep(1:d,2)
-  colnames(w_est_all) = c("w","Dataset","Type","Count","index")
-  p.list[[i]] =  ggplot(data = w_est_all,aes(x=index, y = w, group = Type))+
-    geom_line(aes(col=Type))+
-    #geom_area(aes(y=Count),fill = 'gray60')+
-    ylab("Capture Efficency")+
-    xlab("Taxon Index")+
-    ylim(0,1.1)+
-    ggtitle(paste("Dataset",i))+
-    theme_bw()+
-    theme(
-    axis.title.x = element_text(size = 8),
-    axis.text.x = element_text(size = 8),
-    axis.title.y = element_text(size = 8),
-    legend.title = element_text(size=8),
-    legend.text = element_text(size=8))
+  taxon_sum <- rowSums(O_list[[i]])
+  w_est_t <- as.data.frame(matrix(0,nrow=d,ncol = 3))
+  w_est_t[,1] <- w_list_t[i,]
+  w_est_t[,2] <- paste("Dataset",i)
+  w_est_t[,3] <- "Truth"
+  w_est_t[,4] <- taxon_sum/max(taxon_sum)
+  w_est_e <- as.data.frame(matrix(0,nrow=d,ncol = 3))
+  w_est_e[,1] <- w_list[i,]/mean(w_list[i,])*mean(w_list_t[i,])
+  w_est_e[,2] <- paste("Dataset",i)
+  w_est_e[,3] <- "Estimation"
+  w_est_e[,4] <- taxon_sum/max(taxon_sum)
+  w_est_all <- rbind(w_est_t,w_est_e)
+  w_est_all$index <- rep(1:d,2)
+  colnames(w_est_all) <- c("w","Dataset","Type","Count","index")
+  p.list[[i]] <-  ggplot(data = w_est_all, aes(x = index, y = w, group = Type)) +
+  geom_line(aes(color = Type), size = 1) +
+  labs(
+    title = paste("Dataset", i),
+    x = "Taxon Index",
+    y = "Measurement Efficiency"
+  ) +
+  scale_y_continuous(limits = c(0, 1.1), breaks = seq(0, 1.1, 0.1)) +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.title   = element_text(size = 10, face = "bold"),
+    axis.text    = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 10)
+  )
 }
 
 ```
-
-
 
 ```{r}
 # S1a top panel
 library(ggpubr)
 ggarrange(p.list[[1]],p.list[[2]],p.list[[3]],p.list[[4]],common.legend = TRUE,nrow=1,legend="bottom")
-#ggsave("../fig/w_betada_0.jpeg", units="in", width=12.5, height=3,dpi=300)
+ggsave("../fig/w_betada_0.jpeg", units="in", width=12.5, height=3,dpi=300)
 ```
 
 
-
-
 ```{r}
-beta1 = 5
-metadict_res1 = metadict(O_list,alpha,beta1,gamma,dist,meta.list=NULL,neighbor=3,sigma=1000)
-w_list1 = metadict_res1$w
+beta1 <- 5
+metadict_res1 <- metadict(O_list,alpha,beta1,gamma,dist,meta.list=NULL,neighbor=3,sigma=1000)
+w_list1 <- metadict_res1$w
 
-w_all1 = c(w_list1)
-w_all_t = c(w_list_t)
+w_all1 <- c(w_list1)
+w_all_t <- c(w_list_t)
 print(mean(cor(w_all1,w_all_t)))
 ```
 
 
-
 ```{r}
-d = nrow(count)
-p.list = list()
+d <- nrow(count)
+p.list <- list()
 for(i in 1:m){
-  taxon_sum = rowSums(O_list[[i]])
-  w_est_t = as.data.frame(matrix(0,nrow=d,ncol = 3))
-  w_est_t[,1] = w_list_t[i,]
-  w_est_t[,2] = paste("Dataset",i)
-  w_est_t[,3] = "Truth"
-  w_est_t[,4] = taxon_sum/max(taxon_sum)
-  w_est_e = as.data.frame(matrix(0,nrow=d,ncol = 3))
-  w_est_e[,1] = w_list1[i,]/mean(w_list1[i,])*mean(w_list_t[i,])
-  w_est_e[,2] = paste("Dataset",i)
-  w_est_e[,3] = "Estimation"
-  w_est_e[,4] = taxon_sum/max(taxon_sum)
-  w_est_all = rbind(w_est_t,w_est_e)
-  w_est_all$index = rep(1:d,2)
-  colnames(w_est_all) = c("w","Dataset","Type","Count","index")
-  p.list[[i]] =  ggplot(data = w_est_all,aes(x=index, y = w, group = Type))+
-    geom_line(aes(col=Type))+
-    #geom_area(aes(y=Count),fill = 'gray60')+
-    ylab("Capture Efficency")+
-    xlab("Taxon Index")+
-    ylim(0,1.1)+
-    theme_bw()+
-    ggtitle(paste("Dataset",i))+
-    theme(
-    axis.title.x = element_text(size = 8),
-    axis.text.x = element_text(size = 8),
-    axis.title.y = element_text(size = 8),
-    legend.title = element_text(size=8),
-    legend.text = element_text(size=8))
+  taxon_sum <- rowSums(O_list[[i]])
+  w_est_t <- as.data.frame(matrix(0,nrow=d,ncol = 3))
+  w_est_t[,1] <- w_list_t[i,]
+  w_est_t[,2] <- paste("Dataset",i)
+  w_est_t[,3] <- "Truth"
+  w_est_t[,4] <- taxon_sum/max(taxon_sum)
+  w_est_e <- as.data.frame(matrix(0,nrow=d,ncol = 3))
+  w_est_e[,1] <- w_list[i,]/mean(w_list[i,])*mean(w_list_t[i,])
+  w_est_e[,2] <- paste("Dataset",i)
+  w_est_e[,3] <- "Estimation"
+  w_est_e[,4] <- taxon_sum/max(taxon_sum)
+  w_est_all <- rbind(w_est_t,w_est_e)
+  w_est_all$index <- rep(1:d,2)
+  colnames(w_est_all) <- c("w","Dataset","Type","Count","index")
+  p.list[[i]] <-  ggplot(data = w_est_all, aes(x = index, y = w, group = Type)) +
+  geom_line(aes(color = Type), size = 1) +
+  labs(
+    title = paste("Dataset", i),
+    x = "Taxon Index",
+    y = "Measurement Efficiency"
+  ) +
+  scale_y_continuous(limits = c(0, 1.1), breaks = seq(0, 1.1, 0.1)) +
+  scale_color_brewer(palette = "Set1") +
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.title   = element_text(size = 10, face = "bold"),
+    axis.text    = element_text(size = 10),
+    legend.title = element_text(size = 10),
+    legend.text  = element_text(size = 10)
+  )
 }
 ```
-
-
 
 ```{r}
 # S1a bottom panel
 ggarrange(p.list[[1]],p.list[[2]],p.list[[3]],p.list[[4]],common.legend = TRUE,nrow=1,legend="bottom")
-#ggsave("../fig/w_betada_1.jpeg", units="in", width=12.5, height=3,dpi=300)
+ggsave("../fig/w_betada_1.jpeg", units="in", width=12.5, height=3,dpi=300)
 ```
 
 # S1b
 
 ```{r}
-metadict_res3 = metadict(O_list,0.01,0.1,10,dist,meta.list=NULL,neighbor=3,sigma=1000)
+metadict_res3 <- metadict(O_list,0.1,0.1,10,dist,meta.list=NULL,neighbor=3,sigma=1000)
+metadict_res4 <- metadict(O_list,1,0.1,10,dist,meta.list=NULL,neighbor=3,sigma=1000)
 ```
 
 ```{r}
-metadict_res4 = metadict(O_list,1,0.1,10,dist,meta.list=NULL,neighbor=3,sigma=1000)
-```
+D3 <- metadict_res3$D
+D4 <- metadict_res4$D
 
-```{r}
-D3 = metadict_res3$D
-D4 = metadict_res4$D
+p_data <- data.frame("value" = c(svd(D3)$d,svd(D4)$d), "alpha" = as.factor(c(rep(0.1,nrow(D3)), rep(1,nrow(D4)))), "taxon" = c(1:nrow(D3),1:nrow(D4)))
 
-p_data = data.frame("value" = c(svd(D3)$d,svd(D4)$d), "alpha" = as.factor(c(rep(0,nrow(D3)), rep(1,nrow(D4)))), "taxon" = c(1:nrow(D3),1:nrow(D4)))
-```
-
-
-```{r}
-ggplot(p_data, aes(x = taxon, y = value, color = alpha))+
-  geom_point()+
-  geom_line()+
-  theme_bw()+
-  ylab("Singular Value")
+ggplot(p_data, aes(x = taxon, y = value, color = factor(alpha))) +
+  #geom_point(size = 3) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  labs(
+    x = "Taxon",
+    y = "Singular Value",
+    color = expression(alpha),
+    title = "Singular Values by Taxon"
+  ) +
+  theme_bw(base_family = "Georgia") +
+  ylim(0,3)+
+  theme(
+    plot.title   = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title   = element_text(size = 14, face = "bold"),
+    axis.text    = element_text(size = 12),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text  = element_text(size = 10)
+  )
+ggsave("../fig/beta.jpeg")
 ```
 

@@ -1,0 +1,314 @@
+```{r}
+library(ecodist)
+library(ggplot2)
+library(vegan)
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(bayesm)
+library(ggpubr)
+library(PLSDAbatch)
+library(ggplot2)
+library(RColorBrewer)
+source("./function.R")
+```
+
+```{r}
+count = read.csv("../data/count_order.csv")
+count = count[,-1]
+
+dist = read.csv("../data/dist_order.csv")
+dist = as.matrix(dist[,-1])
+```
+
+```{r}
+init_dataset = function(m,n,count,dist,k,neighbor = 5, sigma = 1, ez = 10, eta = c(1/2,1/2)){
+  
+  #------------------------------------------------------------------------------
+  # 1. Initialize Variables
+  #------------------------------------------------------------------------------
+
+  d <- nrow(count) # Number of taxa
+  O_list <- list() # Observed abundance list
+  X_list <- list() # absolute abundance
+  w_list <- matrix(0,m,d) # measurement efficiency
+  
+  meta.list <- list() # Meta table with covariate Y
+  meta.list1 = list() # Meta table without covariate Y
+  
+  # Select 40 random taxa to be increased in abundance for Y = 1 group
+  d1 <- sample(1:d,40)
+  
+  #------------------------------------------------------------------------------
+  # 2. Construct Taxa Adjacency and Laplacian Matrix
+  #------------------------------------------------------------------------------
+  
+  A <- matrix(0,d,d)
+  for(i in 1:d){
+    idx <- order(dist[i,],decreasing = F)[2:(neighbor+1)]
+    A[i,idx] <- A[idx,i] <- exp(-dist[i,idx]/sigma)
+  }
+  
+  # Compute Laplacian matrix L = D1 - A, where D1 is the degree matrix
+  D1 <- diag(rowSums(A))
+  L <- D1-A 
+  
+  # Extract last k eigenvectors of L for constructing measurement efficiency
+  svd_res <- svd(L)
+  U <- svd_res$u[ , (ncol(svd_res$u) - k + 1):ncol(svd_res$u)]
+  
+  #------------------------------------------------------------------------------
+  # 3. Generate Datasets
+  #------------------------------------------------------------------------------
+  
+  for(i in 1:m){
+     # Sample basis for simulated dataset i
+    idx1 <- sample(ncol(count),n)
+    X0 <- as.matrix(count[,idx1])
+    X0 = t(t(X0)/colSums(X0))
+    
+    # Y: conditions
+    Y <- sample(1:2,size=n,replace=TRUE,prob=c(eta[i],1-eta[i]))
+    
+    # Add differences between two groups
+    X0[d1,which(Y==1)] <- (X0[d1,which(Y==1)]+0.1)*ez
+    
+    # Simulate relative abundance
+    X <- sapply(1:n,function(j)rdirichlet(X0[,j]))
+    
+    
+    # Simulate sequencing depth
+    X_lib <- X%*%diag(sample(10000:11000,n,replace = T))
+
+    #------------------------------------------------------------------------------
+    # 4. Generate Measurement Efficiency 'w'
+    #------------------------------------------------------------------------------
+
+    weight <- 1 - 2 * runif(k)        # Random weights in [-1, 1]
+    w_raw  <- U %*% as.matrix(weight) # Project onto eigenvector space
+    w_vec  <- w_raw[ , 1]             # Extract as a single vector
+    
+    # Normalize 'w' to range [0.05, 1]
+    w_vec <- (w_vec - min(w_vec) + 0.05) 
+    w_vec <- w_vec / max(w_vec)
+    
+    # Y2: uninformative label
+    Y2 <- rbinom(n,1,1/2)
+    
+    #------------------------------------------------------------------------------
+    # 5. Apply Measurement Efficiency and Store Data
+    #------------------------------------------------------------------------------
+
+    O_list[[i]]  <- floor(diag(w_vec) %*% X_lib)  # Apply measurement efficiency
+    w_list[i, ]  <- w_vec                         # Store efficiency vector
+    X_list[[i]]  <- floor(X_lib)                             # Store true abundance
+    
+    # Metadata storage
+    meta.list[[i]]  <- data.frame(Y = paste("Group", Y), Y2 = paste("Group", Y2))
+    meta.list1[[i]] <- data.frame(Y2 = paste("Group", Y2))
+  }
+  return(list(O_list, w_list, X_list, meta.list, meta.list1))
+}
+```
+
+
+```{r}
+eta.list <- list(c(1/2,1/2),c(1/4,3/4),c(1/6,5/6))
+alpha <- 1
+beta <- 0.1
+gamma <- 10
+m <- 2
+n <- 100
+batchid <- as.factor(do.call(c,lapply(1:m, function(x)rep(x,n))))
+```
+
+```{r}
+for(iter in 1:500){
+  for(i in 1:3){
+    eta = eta.list[[i]]
+    
+    # Generate simulated dataset
+    data <- init_dataset(m, n, count, dist, k = 10, ez = 10, eta = eta)
+    
+    # Extract components from the generated data
+    w_list_t    <- data[[2]]  # Measurement efficiency values
+    X_list      <- data[[3]]  # True abundance (without measurement bias)
+    meta.list   <- data[[4]]  # Full metadata (includes Y and Y2)
+    meta.list.sub <- data[[5]] # Metadata subset (without Y)
+    
+    # Combine metadata and observed abundance into single structures
+    meta <- do.call(rbind, meta.list)  # Merge metadata from all datasets
+    X_t <- do.call(cbind,X_list)
+    
+    # Assign batch labels to metadata
+    meta$batch <- factor(rep(paste0("Batch ", seq_len(m)), each = n))
+    meta_sub <- meta[,-1]
+    
+    colnames(X_t) <- paste0("Sample", seq_len(nrow(meta)))
+    rownames(meta) <- paste0("Sample", seq_len(nrow(meta)))
+    rownames(X_t) <- paste0("Taxon", seq_len(nrow(X_t)))
+
+    
+    write.csv(X_t,paste0("../data/Simulation_data/fig3c/count/count_",i,"_iter",iter,".csv"))
+    write.csv(meta,paste0("../data/Simulation_data/fig3c/meta/meta_",i,"_iter",iter,".csv"))
+    save(X_t,meta,X_list,meta.list,meta.list.sub,meta_sub,file = paste0("../data/Simulation_data/fig3c/rdata/rdata_",i,"_iter",iter,".RData"))
+  }
+}
+```
+
+```{r}
+permanova <- function(P, Y, method = "bray") {
+  if(method == "bray"){
+    distP = bcdist(t(P))
+  }else{
+    distP = dist(t(P),method = "euclidean")
+  }
+  
+  df.Y = as.data.frame(Y)
+  Re = adonis2(distP~Y, data = df.Y)
+  return(Re$R2[1])
+}
+
+
+# Add PERMANOVA results to the results dataframe
+add_permanova_results <- function(data, Y, grouping, method, status, dist = "bray") {
+    rbind(
+      res,
+      c(permanova(data, Y, dist), grouping, method, levels[i], status)
+    )
+  }
+
+res = data.frame("R2" = numeric(),"Type" = character(),"Method" = character(),"Level" = character(),"Cov" = character())
+levels = c("None","Medium","High")
+Y2 = as.factor(rbinom(m*n,1,1/2))
+```
+
+```{r}
+for(iter in 1:500){
+  for(i in 1:3){
+   # Load the necessary data
+  eta <- eta.list[[i]]
+  load(paste0("../data/Simulation_data/fig3c/rdata/rdata_", i, "_iter", iter, ".RData"))
+  
+  meta.list.sub = lapply(1:length(meta.list),function(i)data.frame("Y2" = meta.list[[i]]$Y2))
+  
+  sample_info = meta$Y
+  dataset_info = meta$batch
+  
+  meta$Y = as.factor(meta$Y)
+  meta$Y2 = as.factor(meta$Y2)
+  
+  # Perform MetaDICT adjustments
+  metadict_res_1 <- metadict(X_list, alpha, beta, gamma, dist, meta.list = meta.list.sub, normalization = "tss")
+  metadict_res_2 <- metadict(X_list, alpha, beta, gamma, dist, meta.list = meta.list, normalization = "tss")
+
+  # Perform ComBat-Seq adjustments
+  res_ComBatSeq_1 <- sva::ComBat_seq(as.matrix(X_t), dataset_info, group = meta$Y2)
+  res_ComBatSeq_2 <- sva::ComBat_seq(as.matrix(X_t), dataset_info, group = meta$Y)
+
+  # Update column and row names for `X_t` and `meta`
+   colnames(X_t) <- sapply(1:ncol(X_t), function(x) paste("Sample", x))
+   rownames(meta) <- sapply(1:ncol(X_t), function(x) paste("Sample", x))
+   meta$batch <- as.factor(meta$batch)
+
+
+  # Perform MMUPHin adjustments
+  res_mmuphin_1 <- adjust_batch(
+    feature_abd = X_t,
+    batch = "batch",
+    covariates = "Y2",
+    data = meta
+  )$feature_abd_adj
+
+  res_mmuphin_2 <- adjust_batch(
+    feature_abd = X_t,
+    batch = "batch",
+    covariates = "Y",
+    data = meta
+  )$feature_abd_adj
+
+  # Perform ConQuR adjustments
+   tax_tab <- t(X_t)
+   res_ConQuR_1 <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta$Y2)
+   meta$Y <- as.factor(meta$Y)
+   res_ConQuR_2 <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta$Y)
+
+   O_ref = t(X_t)/colSums(X_t)
+   O_ref[O_ref==0] = runif(sum(O_ref==0),0,10-6)
+   colnames(O_ref) = sapply(1:ncol(O_ref),function(i)paste0("Taxon",i))
+   rownames(O_ref) = sapply(1:nrow(O_ref),function(i)paste0("Sample",i))
+   res_percentile_1 = t(percentile_norm(O_ref, dataset_info, meta$Y2, 1))
+   res_percentile_2 = t(percentile_norm(O_ref, dataset_info, meta$Y, "Group 1"))
+
+    O.clr <- microbiome::transform(X_t, "clr")
+    res_plsda_1 = t(PLSDA_batch(t(O.clr), Y.trt = Y2, Y.bat = dataset_info)$X.nobatch)
+    res_plsda_2 = t(PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = dataset_info, balance = F)$X.nobatch)
+
+  res_debiasm_1 = t(read.csv(paste0("../data/Simulation_data/fig3c/res_debiasm/debias_",i,"_iter", iter, "_2.csv"))[,-1])
+  res_debiasm_2 = t(read.csv(paste0("../data/Simulation_data/fig3c/res_debiasm/debias_",i,"_iter", iter, "_1.csv"))[,-1])
+
+  res_scanvi_1 = t(read.csv(paste0("../data/Simulation_data/fig3c/res_scanvi/scanvi_",i,"_iter", iter, "_2.csv"))[,-1])
+  res_scanvi_2 = t(read.csv(paste0("../data/Simulation_data/fig3c/res_scanvi/scanvi_",i,"_iter", iter, "_1.csv"))[,-1])
+
+
+
+  res <- add_permanova_results(X_t, batchid, "batch", "Truth", "Not observed")
+  res <- add_permanova_results(X_t, batchid, "batch", "Truth", "Observed")
+  res <- add_permanova_results(X_t, sample_info, "sample", "Truth", "Not observed")
+  res <- add_permanova_results(X_t, sample_info, "sample", "Truth", "Observed")
+  
+  # PERMANOVA for MetaDICT
+  res <- add_permanova_results(metadict_res_1$X, batchid, "batch", "MetaDICT", "Not observed")
+  res <- add_permanova_results(metadict_res_2$X, batchid, "batch", "MetaDICT", "Observed")
+  res <- add_permanova_results(metadict_res_1$X, sample_info, "sample", "MetaDICT", "Not observed")
+  res <- add_permanova_results(metadict_res_2$X, sample_info, "sample", "MetaDICT", "Observed")
+  
+  # PERMANOVA for ComBat-Seq
+  res <- add_permanova_results(res_ComBatSeq_1, batchid, "batch", "ComBatSeq", "Not observed")
+  res <- add_permanova_results(res_ComBatSeq_2, batchid, "batch", "ComBatSeq", "Observed")
+  res <- add_permanova_results(res_ComBatSeq_1, sample_info,"sample", "ComBatSeq", "Not observed")
+  res <- add_permanova_results(res_ComBatSeq_2, sample_info,"sample", "ComBatSeq", "Observed")
+
+  # PERMANOVA for ConQuR
+  res <- add_permanova_results(t(res_ConQuR_1), batchid, "batch", "ConQuR", "Not observed")
+  res <- add_permanova_results(t(res_ConQuR_2), batchid, "batch", "ConQuR", "Observed")
+  res <- add_permanova_results(t(res_ConQuR_1), sample_info,"sample", "ConQuR", "Not observed")
+  res <- add_permanova_results(t(res_ConQuR_2), sample_info,"sample", "ConQuR", "Observed")
+  
+  # PERMANOVA for MMUPHin
+  res <- add_permanova_results(res_mmuphin_1, batchid, "batch", "MMUPHin", "Not observed")
+  res <- add_permanova_results(res_mmuphin_2, batchid, "batch", "MMUPHin", "Observed")
+  res <- add_permanova_results(res_mmuphin_1, sample_info,"sample", "MMUPHin", "Not observed")
+  res <- add_permanova_results(res_mmuphin_2, sample_info,"sample", "MMUPHin", "Observed")
+  
+  # Percentile normalization PERMANOVA
+  res <- add_permanova_results(res_percentile_1, batchid, "batch", "Percentile-Norm", "Not observed")
+  res <- add_permanova_results(res_percentile_2, batchid, "batch", "Percentile-Norm", "Observed")
+  res <- add_permanova_results(res_percentile_1, sample_info,"sample", "Percentile-Norm", "Not observed")
+  res <- add_permanova_results(res_percentile_2, sample_info,"sample", "Percentile-Norm", "Not observed")
+
+  # PLSDA-batch PERMANOVA
+  res <- add_permanova_results(res_plsda_1, batchid, "batch", "PLSDA-batch", "Not observed",dist = "euc")
+  res <- add_permanova_results(res_plsda_2, batchid, "batch", "PLSDA-batch", "Observed",dist = "euc")
+  res <- add_permanova_results(res_plsda_1, sample_info,"sample", "PLSDA-batch", "Not observed",dist = "euc")
+  res <- add_permanova_results(res_plsda_2, sample_info,"sample", "PLSDA-batch", "Observed",dist = "euc")
+
+  # DEBIASM PERMANOVA
+  res <- add_permanova_results(res_debiasm_1, batchid, "batch", "DEBIAS-M", "Not observed")
+  res <- add_permanova_results(res_debiasm_2, batchid, "batch", "DEBIAS-M", "Observed")
+  res <- add_permanova_results(res_debiasm_1, sample_info,"sample", "DEBIAS-M", "Not observed")
+  res <- add_permanova_results(res_debiasm_2, sample_info,"sample", "DEBIAS-M", "Observed")
+
+  # scANVI PERMANOVA
+  res <- add_permanova_results(res_scanvi_1, batchid, "batch", "scANVI", "Not observed", dist = "euc")
+  res <- add_permanova_results(res_scanvi_2, batchid, "batch", "scANVI", "Observed", dist = "euc")
+  res <- add_permanova_results(res_scanvi_1, sample_info,"sample", "scANVI", "Not observed", dist = "euc")
+  res <- add_permanova_results(res_scanvi_2, sample_info,"sample", "scANVI", "Observed", dist = "euc")
+  print(i)
+  }
+  print(paste("Iter",iter,"finished."))
+}
+```
+
+
+

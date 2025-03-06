@@ -1,0 +1,703 @@
+
+```{r}
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(ggraph)
+library(PLSDAbatch)
+
+source("./function.R")
+```
+
+```{r}
+# load order level data
+count = read.csv("../data/count_order.csv")
+count = count[,-1]
+
+dist = read.csv("../data/dist_order.csv")
+dist = as.matrix(dist[,-1])
+```
+
+```{r}
+init_dataset <- function(m, n, count, dist, k, neighbor = 5, sigma = 1, ez = 10, lib_var = TRUE) {
+  # Number of taxa
+  d <- nrow(count)
+  
+  # Initialize lists to store outputs
+  O_list   <- list()
+  X_list   <- list()
+  meta_list <- list()
+  # Initialize a matrix for weight vectors
+  w_list   <- matrix(0, nrow = m, ncol = d)
+  
+  # Create an affinity matrix based on the distance matrix 'dist'
+  A <- matrix(0, nrow = d, ncol = d)
+  
+  # Randomly assign each taxon to one of 5 groups
+  taxagroup <- sample(1:5, size = d, replace = TRUE, prob = rep(1/5, 5))
+  
+  # Construct weighted adjacency matrix using an exponential kernel
+  for (i in 1:d) {
+    # Exclude self (hence starting from the 2nd smallest distance)
+    idx <- order(dist[i, ], decreasing = FALSE)[2:(neighbor + 1)]
+    A[i, idx] <- exp(-dist[i, idx] / sigma)
+    A[idx, i] <- exp(-dist[i, idx] / sigma)
+  }
+  
+  # Compute graph Laplacian and extract the last k singular vectors (for dimensionality reduction)
+  D1 <- diag(rowSums(A))
+  L <- D1 - A
+  svd_res <- svd(L)
+  U <- svd_res$u[, (ncol(svd_res$u) - k + 1):ncol(svd_res$u)]
+  
+  # Generate m datasets
+  for (i in 1:m) {
+    # Randomly select n samples (columns) from count
+    idx1 <- sample(ncol(count), n)
+    X <- as.matrix(count[, idx1])
+    
+    # Randomly assign each sample to one of 4 subpopulations
+    Y <- sample(1:4, size = n, replace = TRUE, prob = rep(1/4, 4))
+    
+    # Boost counts based on taxagroup and assigned subpopulation
+    X[which(taxagroup == 2), which(Y == 1)] <- (X[which(taxagroup == 2), which(Y == 1)] + 1) * ez
+    X[which(taxagroup == 3), which(Y == 2)] <- (X[which(taxagroup == 3), which(Y == 2)] + 1) * ez
+    X[which(taxagroup == 4), which(Y == 3)] <- (X[which(taxagroup == 4), which(Y == 3)] + 1) * ez
+    X[which(taxagroup == 5), which(Y == 4)] <- (X[which(taxagroup == 5), which(Y == 4)] + 1) * ez
+    
+    # Optionally introduce library variation
+    if (lib_var) {
+      if (i %% 2 == 1) {
+        X_lib <- X %*% diag(sample(100:500, n, replace = TRUE))
+      } else {
+        X_lib <- X %*% diag(sample(10:50, n, replace = TRUE))
+      }
+    } else {
+      X_lib <- X
+    }
+    
+    # Calculate weight vector using the spectral embedding U
+    weight <- 1 - 2 * runif(k)
+    w <- (U %*% as.matrix(weight))[, 1]
+    w <- (w - min(w) + 0.05)
+    w <- w / max(w)
+    
+    # Generate observed data by scaling X_lib with the computed weights
+    O_list[[i]] <- floor(diag(w) %*% X_lib)
+    w_list[i, ] <- w
+    X_list[[i]] <- X
+    meta_list[[i]] <- data.frame(Y = paste("Subpopulation", Y))
+  }
+  
+  return(list(O_list = O_list, w_list = w_list, X_list = X_list,
+              meta_list = meta_list, taxagroup = taxagroup))
+}
+
+```
+
+```{r}
+set.seed(3)
+m = 2
+n = 50
+
+data = init_dataset(m,n,count,dist,k=10, ez=50)
+w_list_t = data[[2]]
+O_list = data[[1]]
+meta.list = data[[4]]
+meta = do.call("rbind",meta.list)
+batchid = as.factor(do.call(c,lapply(1:m, function(x)rep(x,n))))
+O = do.call(cbind,O_list)
+X_t = do.call(cbind,data[[3]])
+diff_set = data[[5]]
+```
+
+```{r}
+alpha = 1
+beta = 0.1
+gamma = 1
+metadict_res = metadict(O_list,alpha,beta,gamma,dist,meta.list)
+
+D = metadict_res$D
+diff_set = sapply(data[[5]], function(i)paste("Microbial Community",i))
+```
+
+
+## taxa community detection (S4a)
+
+```{r}
+cluster_graph = function(g, taxa_res, diff_set, title, colorset = "Set1"){
+  p <- ggraph(g, layout = "stress") +
+    geom_edge_fan(alpha = 0.05, show.legend = FALSE) +
+    geom_node_point(aes(color = taxa_res, shape = as.factor(diff_set)),
+                    size = 2) +  # slightly larger nodes
+    labs(
+      title = title,
+      subtitle = paste("ARI =", round(adjustedRandIndex(taxa_res, diff_set), digits = 2)),
+      x = NULL,
+      y = NULL
+    ) +
+    scale_color_brewer(palette = colorset) +
+    guides(color = "none", shape = guide_legend(title = "Truth")) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 14),
+      legend.title = element_text(size = 14),  # Increase legend title size
+      legend.text  = element_text(size = 12),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      legend.position = "right"
+    )
+  return(p)
+}
+```
+
+
+```{r}
+set.seed(2024)
+res = community_detection(D[,1:50],K=10)
+taxa_res_metadict = as.factor(res$cluster)
+g = res$graph
+p1 = cluster_graph(g, taxa_res_metadict, diff_set, "MetaDICT")
+p1
+```
+
+
+```{r}
+set.seed(2024)
+ari = c()
+  avg_silwidth = c()
+  for(j in 1:m){
+      membership = community_detection(O_list[[j]],K=10)$cluster
+      if(length(unique(membership))!=1){
+            avg_silwidth= c(avg_silwidth,mean(cluster::silhouette(membership, dist(O_list[[j]], method = "euclidean"))[,3], na.rm = TRUE))
+            ari = c(ari,adjustedRandIndex(membership,diff_set))
+        }
+  }
+res = community_detection(O_list[[which.max(ari)]],K=10)
+taxa_res_single = as.factor(res$cluster)
+g = res$graph
+
+p2 = cluster_graph(g, taxa_res_single, diff_set, "Single Dataset")
+p2
+```
+
+
+```{r}
+set.seed(2024)
+res = community_detection(O,K=10)
+taxa_res_unprocessed = as.factor(res$cluster)
+g = res$graph
+p3 = cluster_graph(g, taxa_res_unprocessed, diff_set, "Unprocessed")
+p3
+```
+
+
+```{r}
+set.seed(2024)
+res_ComBatSeq = sva::ComBat_seq(as.matrix(O), batchid, covar_mod = meta)
+
+res = community_detection(res_ComBatSeq,K=10)
+taxa_res_combatseq = as.factor(res$cluster)
+g = res$graph
+p4 = cluster_graph(g, taxa_res_combatseq, diff_set, "ComBatSeq")
+p4
+```
+
+
+```{r}
+set.seed(2024)
+colnames(O) = sapply(1:ncol(O),function(x)paste("Sample",x))
+rownames(meta) = sapply(1:ncol(O),function(x)paste("Sample",x))
+meta$batch = as.factor(batchid)
+
+res_mmuphin = adjust_batch(feature_abd = O,
+                            batch = "batch",
+                            covariates = c("Y"),
+                            data = meta)$feature_abd_adj
+
+
+res = community_detection(res_mmuphin,K=10)
+taxa_res_mmuphin = as.factor(res$cluster)
+g = res$graph
+p5 = cluster_graph(g, taxa_res_mmuphin, diff_set, "MMUPHin")
+p5
+```
+
+
+```{r}
+set.seed(2024)
+tax_tab = t(O)
+res_conqur = ConQuR(tax_tab,as.factor(batchid),batch_ref = 1,covariates = as.factor(meta$Y))
+
+res = community_detection(t(res_conqur), K=10)
+taxa_res_conqur = as.factor(res$cluster)
+g = res$graph
+p6 = cluster_graph(g, taxa_res_conqur, diff_set, "ConQuR")
+p6
+```
+
+```{r}
+set.seed(2024)
+O_ref = t(O)/colSums(O)
+O_ref[O_ref==0] = runif(sum(O_ref==0),0,10-6)
+colnames(O_ref) = sapply(1:ncol(O_ref),function(i)paste0("Taxon",i))
+rownames(O_ref) = sapply(1:nrow(O_ref),function(i)paste0("Sample",i))
+res_percentile = percentile_norm(O_ref, batchid, meta$Y, "Subpopulation 4")
+res = community_detection(t(res_percentile),K=10)
+taxa_res_percentile = as.factor(res$cluster)
+g = res$graph
+p7 = cluster_graph(g, taxa_res_percentile, diff_set, "Percentile-Norm")
+p7
+```
+
+
+```{r}
+set.seed(2024)
+O.clr <- microbiome::transform(O, "clr")
+res_plsda = t(PLSDA_batch(t(O.clr), Y.trt = meta$Y, Y.bat = batchid)$X.nobatch)
+res = community_detection(res_plsda,K=10)
+taxa_res_plsda = as.factor(res$cluster)
+g = res$graph
+p8 = cluster_graph(g, taxa_res_plsda, diff_set, "PLSDA-batch")
+p8
+```
+
+
+```{r}
+res_debiasm = read.csv("../data/Simulation_data/other_sim/debiasm_res_4ab.csv", row.names = 1)
+res = community_detection(t(res_debiasm),K=10)
+taxa_res_debiasm = as.factor(res$cluster)
+g = res$graph
+p9 = cluster_graph(g, taxa_res_debiasm, diff_set, "DEBIAS-M")
+p9
+```
+
+```{r}
+#meta$batch = sapply(batchid, function(i)paste("batch",i))
+#write.csv(O,"../data/Simulation_data/other_sim/Fig4ab_count.csv")
+#write.csv(meta,"../data/Simulation_data/other_sim/Fig4ab_meta.csv")
+```
+
+```{r}
+library(ggpubr)
+ggarrange(p1,p2,p3,p4,p5,p6,p7,p8,p9,common.legend = TRUE,nrow=1,legend="bottom")
+ggsave("../fig/taxa_cluster_cov.jpeg", dpi=300, units="in", width=20, height=3)
+```
+
+# subpopulation detection
+
+```{r}
+set.seed(2024)
+library(ggraph)
+R_list = metadict_res$R
+R = do.call(cbind,R_list)
+sample_res = community_detection(t(R),K=10, resolution = 1)
+sample_res_metadict = as.factor(sample_res$cluster)
+g2 = sample_res$graph
+p1 = cluster_graph(g2, sample_res_metadict, meta$Y, "MetaDICT", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_raw_s = community_detection(t(O), K=10, resolution = 1)
+sample_res_unprocessed = as.factor(c_raw_s$cluster)
+p3 = cluster_graph(c_raw_s$g, sample_res_unprocessed, meta$Y, "Unprocessed", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_combatseq_s = community_detection(t(res_ComBatSeq), K=10, resolution = 1)
+sample_res_combatseq = as.factor(c_combatseq_s$cluster)
+p4 = cluster_graph(c_combatseq_s$g, sample_res_combatseq, meta$Y, "ComBatSeq", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_mmuphin_s = community_detection(t(res_mmuphin),K=10, resolution = 1)
+sample_res_mmuphin = as.factor(c_mmuphin_s$cluster)
+p5 = cluster_graph(c_mmuphin_s$g, sample_res_mmuphin, meta$Y, "MMUPHin", colorset = "Set2")
+```
+
+```{r,warning=F}
+set.seed(2024)
+c_conqur_s = community_detection(res_conqur,K=10, resolution = 1)
+sample_res_conqur = as.factor(c_conqur_s$cluster)
+p6 = cluster_graph(c_conqur_s$g, sample_res_conqur, meta$Y, "ConQuR", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_percentile_s = community_detection(res_percentile, K=10, resolution = 1)
+sample_res_percentile = as.factor(c_percentile_s$cluster)
+p7 =  cluster_graph(c_percentile_s$g, sample_res_percentile, meta$Y, "Percentile-Norm", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_plsda_s = community_detection(t(res_plsda), K=10, resolution = 1)
+sample_res_plsda = as.factor(c_plsda_s$cluster)
+p8 =  cluster_graph(c_plsda_s$g, sample_res_plsda, meta$Y, "PLSDA-batch", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_debiasm_s = community_detection(res_debiasm, K=10, resolution = 1)
+sample_res_debiasm = as.factor(c_debiasm_s$cluster)
+p9 = cluster_graph(c_debiasm_s$g, sample_res_debiasm, meta$Y, "DEBIAS-M", colorset = "Set2") 
+```
+
+```{r}
+set.seed(2024)
+res_scvi = read.csv("../data/Simulation_data/other_sim/scvi_res_4ab.csv", row.names = 1)
+c_scvi_s = community_detection(res_scvi, K=10, resolution = 1)
+sample_res_scvi = as.factor(c_scvi_s$cluster)
+p10 = cluster_graph(c_scvi_s$g, sample_res_scvi, meta$Y, "scANVI", colorset = "Set2")
+```
+
+
+```{r}
+library(ggpubr)
+#ggarrange(p1,p3,p4,p5,p6,p7,p8,p9,p10,common.legend = TRUE,ncol = 9, nrow=1,legend="bottom")
+#ggsave("../fig/sample_cluster_cov.jpeg", dpi=300, units="in", width=20, height=3)
+```
+
+
+## Fig S6
+
+```{r}
+library(RColorBrewer)
+library(pheatmap)
+heatmap_plot = function(X,diff_set,Y,main){
+  data_D = as.data.frame(t(X))
+  rownames(data_D) = sapply(1:nrow(data_D),function(i)paste("Sample",i))
+  colnames(data_D) = sapply(1:ncol(data_D),function(i)paste("Taxon",i))
+  
+  data_D = data_D[,order(diff_set)]
+  cluster.taxa = data.frame("Taxa" = diff_set[order(diff_set)])
+  rownames(cluster.taxa) = colnames(data_D)
+  
+  data_D = data_D[order(Y),]
+  cluster.sample = data.frame("Sample" = Y[order(Y)])
+  rownames(cluster.sample) = rownames(data_D)
+  
+  Var1 = brewer.pal(8, "Set3")[5:(4+length(unique(Y)))]
+  names(Var1) = unique(Y)
+  Var2 = c(brewer.pal(8, "Set2"),brewer.pal(8, "Set1"))[1:length(unique(diff_set))]
+  names(Var2) = unique(diff_set)
+  ann_colors = list("Taxa" = Var2,"Subpopulation" = Var1)
+  
+  p1 = pheatmap(data_D, 
+         main = main, 
+         annotation_col = cluster.taxa, 
+         annotation_row = cluster.sample, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE, 
+         show_colnames = FALSE, 
+         show_rownames = FALSE, 
+         annotation_colors = ann_colors, 
+         color = colorRampPalette(c("midnightblue", "white", "darkred"))(100),
+         border_color = NA)
+  return(p1)
+}
+```
+
+
+```{r}
+X_t = do.call(cbind,data[[3]])
+X_t1 = X_t/50
+p1 = heatmap_plot(log(X_t1+0.5),diff_set,meta$Y,"Truth")
+ggsave("../fig/truth_heatmap.jpeg", p1,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_metadict,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_metadict,function(x)paste("Estimated Subpopulation",x))
+p2 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"MetaDICT")
+ggsave("../fig/metadict_heatmap.jpeg", p2,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_unprocessed,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_unprocessed,function(x)paste("Estimated Subpopulation",x))
+p3 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"Unprocessed")
+ggsave("../fig/unprocessed_heatmap.jpeg", p3,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_combatseq,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_combatseq,function(x)paste("Estimated Subpopulation",x))
+p4 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"ComBatSeq")
+ggsave("../fig/combatseq_heatmap.jpeg", p4,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_mmuphin,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_mmuphin,function(x)paste("Estimated Subpopulation",x))
+p5 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"MMUPHin")
+ggsave("../fig/mmuphin_heatmap.jpeg", p5,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_conqur,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_conqur,function(x)paste("Estimated Subpopulation",x))
+p6 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"ConQuR")
+ggsave("../fig/conqur_heatmap.jpeg", p6,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_percentile,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_percentile,function(x)paste("Estimated Subpopulation",x))
+p7 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"Percentile-Norm")
+ggsave("../fig/percentile_heatmap.jpeg", p7,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_plsda,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_plsda,function(x)paste("Estimated Subpopulation",x))
+p8 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"PLSDA-batch")
+ggsave("../fig/plsda_heatmap.jpeg", p8,dpi=300, units="in", width=8, height=6)
+```
+
+```{r}
+taxa_c = sapply(taxa_res_debiasm,function(x)paste("Estimated Community",x))
+sample_c = sapply(sample_res_debiasm,function(x)paste("Estimated Subpopulation",x))
+p9 = heatmap_plot(log(X_t1+0.5),taxa_c,sample_c,"DEBIAS-M")
+ggsave("../fig/debiasm_heatmap.jpeg", p9,dpi=300, units="in", width=8, height=6)
+```
+
+
+# unsupervised 
+
+```{r}
+set.seed(1)
+meta.list1 = list()
+for(i in 1:m){
+  meta.list1[[i]] = data.frame("Y" = sample(1:2,n,replace = T))
+}
+```
+
+```{r}
+alpha = 1
+beta = 0.1
+gamma = 1
+metadict_res = metadict(O_list,alpha,beta,gamma,dist,meta.list1)
+```
+
+```{r}
+D = metadict_res$D
+diff_set = sapply(data[[5]], function(i)paste("Microbial Community",i))
+meta1 = do.call("rbind", meta.list1)
+```
+
+```{r}
+meta1$Y = paste("Subpopulation",meta1$Y)
+```
+
+
+
+## taxa community detection (S4a)
+
+```{r}
+set.seed(2024)
+res = community_detection(D[,1:50],K=10)
+taxa_res_metadict = as.factor(res$cluster)
+g = res$graph
+p1 = cluster_graph(g, taxa_res_metadict, diff_set, "MetaDICT")
+p1
+```
+
+```{r}
+set.seed(2024)
+ari = c()
+  avg_silwidth = c()
+  for(j in 1:m){
+      membership = community_detection(O_list[[j]],K=10)$cluster
+      if(length(unique(membership))!=1){
+            avg_silwidth= c(avg_silwidth,mean(cluster::silhouette(membership, dist(O_list[[j]], method = "euclidean"))[,3], na.rm = TRUE))
+            ari = c(ari,adjustedRandIndex(membership,diff_set))
+        }
+  }
+res = community_detection(O_list[[which.max(ari)]],K=10)
+taxa_res_single = as.factor(res$cluster)
+g = res$graph
+
+p2 = cluster_graph(g, taxa_res_single, diff_set, "Single Dataset")
+p2
+```
+
+```{r}
+set.seed(2024)
+res = community_detection(O,K=10)
+taxa_res_unprocessed = as.factor(res$cluster)
+g = res$graph
+p3 = cluster_graph(g, taxa_res_unprocessed, diff_set, "Unprocessed")
+p3
+```
+
+```{r}
+set.seed(2024)
+res_ComBatSeq = sva::ComBat_seq(as.matrix(O), batchid, covar_mod = meta1)
+res = community_detection(res_ComBatSeq,K=10)
+taxa_res_combatseq = as.factor(res$cluster)
+g = res$graph
+p4 = cluster_graph(g, taxa_res_combatseq, diff_set, "ComBatSeq")
+p4
+```
+
+```{r}
+set.seed(2024)
+colnames(O) = sapply(1:ncol(O),function(x)paste("Sample",x))
+rownames(meta1) = sapply(1:ncol(O),function(x)paste("Sample",x))
+meta1$batch = as.factor(batchid)
+
+res_mmuphin = adjust_batch(feature_abd = O,
+                            batch = "batch",
+                            covariates = c("Y"),
+                            data = meta1)$feature_abd_adj
+
+
+res = community_detection(res_mmuphin,K=10)
+taxa_res_mmuphin = as.factor(res$cluster)
+g = res$graph
+p5 = cluster_graph(g, taxa_res_mmuphin, diff_set, "MMUPHin")
+p5
+```
+
+```{r}
+set.seed(2024)
+tax_tab = t(O)
+res_conqur = ConQuR(tax_tab,as.factor(batchid),batch_ref = 1,covariates = as.factor(meta1$Y))
+
+res = community_detection(t(res_conqur), K=10)
+taxa_res_conqur = as.factor(res$cluster)
+g = res$graph
+p6 = cluster_graph(g, taxa_res_conqur, diff_set, "ConQuR")
+```
+
+```{r}
+set.seed(2024)
+O_ref = t(O)/colSums(O)
+O_ref[O_ref==0] = runif(sum(O_ref==0),0,10-6)
+colnames(O_ref) = sapply(1:ncol(O_ref),function(i)paste0("Taxon",i))
+rownames(O_ref) = sapply(1:nrow(O_ref),function(i)paste0("Sample",i))
+res_percentile = percentile_norm(O_ref, batchid, meta1$Y, "Subpopulation 2")
+res = community_detection(t(res_percentile),K=10)
+taxa_res_percentile = as.factor(res$cluster)
+g = res$graph
+p7 = cluster_graph(g, taxa_res_percentile, diff_set, "Percentile-Norm")
+p7
+```
+
+```{r}
+set.seed(2024)
+O.clr <- microbiome::transform(O, "clr")
+res_plsda = t(PLSDA_batch(t(O.clr), Y.trt = meta1$Y, Y.bat = batchid)$X.nobatch)
+res = community_detection(res_plsda,K=10)
+taxa_res_plsda = as.factor(res$cluster)
+g = res$graph
+p8 = cluster_graph(g, taxa_res_plsda, diff_set, "PLSDA-batch")
+p8
+```
+
+```{r}
+res_debiasm = read.csv("../data/Simulation_data/other_sim/debiasm_res_4ab_1.csv", row.names = 1)
+res = community_detection(t(res_debiasm),K=10)
+taxa_res_debiasm = as.factor(res$cluster)
+g = res$graph
+p9 = cluster_graph(g, taxa_res_debiasm, diff_set, "DEBIAS-M")
+```
+
+```{r}
+meta$batch = sapply(batchid, function(i)paste("batch",i))
+#write.csv(O,"../data/Simulation_data/other_sim/Fig4ab_count1.csv")
+#write.csv(meta,"../data/Simulation_data/other_sim/Fig4ab_meta1.csv")
+```
+
+```{r}
+library(ggpubr)
+ggarrange(p1,p2,p3,p4,p5,p6,p7,p8,p9,common.legend = TRUE,nrow=1,legend="bottom")
+ggsave("../fig/taxa_cluster_nocov.jpeg", dpi=300, units="in", width=20, height=3)
+```
+
+# subpopulation detection
+
+```{r}
+set.seed(2024)
+library(ggraph)
+R_list = metadict_res$R
+R = do.call(cbind,R_list)
+sample_res = community_detection(t(R[1:50,]),K=10, resolution = 1)
+sample_res_metadict = as.factor(sample_res$cluster)
+g2 = sample_res$graph
+p1 = cluster_graph(g2, sample_res_metadict, meta$Y, "MetaDICT", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_raw_s = community_detection(t(O), K=10, resolution = 1)
+sample_res_unprocessed = as.factor(c_raw_s$cluster)
+p3 = cluster_graph(c_raw_s$g, sample_res_unprocessed, meta$Y, "Unprocessed", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_combatseq_s = community_detection(t(res_ComBatSeq), K=10, resolution = 1)
+sample_res_combatseq = as.factor(c_combatseq_s$cluster)
+p4 = cluster_graph(c_combatseq_s$g, sample_res_combatseq, meta$Y, "ComBatSeq", colorset = "Set2")
+```
+
+
+```{r}
+set.seed(2024)
+c_mmuphin_s = community_detection(t(res_mmuphin),K=10, resolution = 1)
+sample_res_mmuphin = as.factor(c_mmuphin_s$cluster)
+p5 = cluster_graph(c_mmuphin_s$g, sample_res_mmuphin, meta$Y, "MMUPHin", colorset = "Set2")
+```
+
+```{r,warning=F}
+set.seed(2024)
+c_conqur_s = community_detection(res_conqur,K=10, resolution = 1)
+sample_res_conqur = as.factor(c_conqur_s$cluster)
+p6 = cluster_graph(c_conqur_s$g, sample_res_conqur, meta$Y, "ConQuR", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_percentile_s = community_detection(res_percentile, K=10, resolution = 1)
+sample_res_percentile = as.factor(c_percentile_s$cluster)
+p7 =  cluster_graph(c_percentile_s$g, sample_res_percentile, meta$Y, "Percentile-Norm", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_plsda_s = community_detection(t(res_plsda), K=10, resolution = 1)
+sample_res_plsda = as.factor(c_plsda_s$cluster)
+p8 =  cluster_graph(c_plsda_s$g, sample_res_plsda, meta$Y, "PLSDA-batch", colorset = "Set2")
+```
+
+```{r}
+set.seed(2024)
+c_debiasm_s = community_detection(res_debiasm, K=10, resolution = 1)
+sample_res_debiasm = as.factor(c_debiasm_s$cluster)
+p9 = cluster_graph(c_debiasm_s$g, sample_res_debiasm, meta$Y, "DEBIAS-M", colorset = "Set2") 
+```
+
+```{r}
+set.seed(2024)
+res_scvi = read.csv("../data/Simulation_data/other_sim/scvi_res_4ab_1.csv", row.names = 1)
+c_scvi_s = community_detection(res_scvi, K=10, resolution = 1)
+sample_res_scvi = as.factor(c_scvi_s$cluster)
+p10 = cluster_graph(c_scvi_s$g, sample_res_scvi, meta$Y, "scANVI", colorset = "Set2")
+```
+
+```{r}
+library(ggpubr)
+ggarrange(p1,p3,p4,p5,p6,p7,p8,p9,p10,common.legend = TRUE,ncol = 9, nrow=1,legend="bottom")
+ggsave("../fig/sample_cluster_nocov.jpeg", dpi=300, units="in", width=20, height=3)
+```
+
+
+
+

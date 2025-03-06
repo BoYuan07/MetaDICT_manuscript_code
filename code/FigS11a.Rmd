@@ -1,0 +1,377 @@
+```{r}
+library(RDB)
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(Maaslin2)
+library(ANCOMBC)
+library(PLSDAbatch)
+library(S4Vectors)
+library(TreeSummarizedExperiment)
+library(sva)
+
+source("./function.R")
+```
+
+```{r}
+count <- read.csv("../data/count_order.csv")
+count <- count[,-1]
+
+dist <- read.csv("../data/dist_order.csv")
+dist <- as.matrix(dist[,-1])
+```
+
+```{r}
+init_dataset_da <- function(m, n, count, dist, k, k1, p, ez = 50, lib_var = TRUE) {
+  d <- nrow(count)
+  O_list <- list()
+  w_list <- list()
+  X_list <- list()
+  meta_list <- list()
+  
+  prevalence <- rowSums(count != 0)
+  diff_idx <- order(prevalence, decreasing = TRUE)[k:1]
+  idx1 <- sample(k, k1)
+  seq_idx1 <- diff_idx[idx1]
+  seq_idx2 <- diff_idx[-idx1]
+  sample_info <- c()
+
+  A <- exp(-dist / 0.1)
+  L <- diag(colSums(A)) - A
+  svd_res <- svd(L)
+  U <- svd_res$u
+  U <- U[, (ncol(U) - 100):(ncol(U))]
+  
+
+  for (i in 1:m) {
+    idx <- sample(ncol(count), n)
+    X <- as.matrix(count[, idx])
+    Y <- sample(0:1, n, TRUE, prob = c(p[i], 1 - p[i]))
+   
+    X[seq_idx1, which(Y == 0)] <- (X[seq_idx1, which(Y == 0)]) / ez
+    X[seq_idx2, which(Y == 0)] <- (X[seq_idx2, which(Y == 0)]) * ez
+    
+    index <- sample(100, 30)
+    w_space <- U[, index]
+    weight <- 1 - 2 * runif(30)
+    
+    w <- (w_space %*% as.matrix(weight))[, 1]
+    w <- (w - min(w) + 1e-3)
+    w <- w / max(w)
+    w <- w / mean(w) * 0.5
+
+    if (lib_var) {
+      if (i %% 2 == 1) {
+        X_lib <- X %*% diag(sample(100:500, n, replace = TRUE))
+      } else {
+        X_lib <- X %*% diag(sample(10:100, n, replace = TRUE))
+      }
+    } else {
+      X_lib <- X
+    }
+    
+    meta_list[[i]] <- data.frame("Y" = Y) 
+    O_list[i] <- list(floor(diag(w) %*% X_lib))
+    w_list[i] <- list(w)
+    X_list[i] <- list(floor(X))
+    diff_idx <- c(rownames(count)[seq_idx1], rownames(count)[seq_idx2])
+  }
+  
+  return(list(O_list, w_list, X_list, diff_idx, meta_list))
+}
+
+
+```
+
+```{r}
+t_test <- function(X, Y, Clade, alpha, method = "BH") {
+  d <- nrow(X)
+  data <- cbind(t(X), Y)
+  
+  # Perform t-tests for each feature
+  t_p <- sapply(1:d, function(i) t.test(data[, i] ~ Y, data = data)$p.value)
+  
+  # Adjust p-values for multiple testing
+  p <- p.adjust(t_p, method = method)
+  
+  # Get significant features
+  res <- rownames(X)[which(p < alpha)]
+  
+  # Compute FDR
+  if (length(res) == 0) {
+    fdr <- 0
+  } else {
+    fdr <- mean(!res %in% Clade)
+  }
+  
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+
+```
+
+
+```{r}
+rdb_test <- function(X, Y, Clade, alpha = 0.1) {
+  # Normalize counts by column sums
+  P <- t(X) / colSums(X)
+  
+  # Perform the RDB test and extract significant features
+  res <- rownames(X)[which(RDB::rdb(P, Y, alpha = alpha) == TRUE)]
+  
+  # Compute FDR
+  if (length(res) == 0) {
+    fdr <- 0
+  } else {
+    fdr <- mean(!res %in% Clade)
+  }
+  
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+
+```
+
+```{r}
+linda_test <- function(X, meta, Clade, alpha = 0.1) {
+  # Scale data
+  X <- X * 1000
+  
+  # Perform the LINDA test while suppressing output messages
+  invisible(capture.output(
+    res <- rownames(X)[which(MicrobiomeStat::linda(
+      X, meta, formula = "~Y", p.adj.method = "BH", alpha = alpha
+    )$output$Y$reject == TRUE)]
+  ))
+
+  # Compute FDR
+  if (length(res) == 0) {
+    fdr <- 0
+  } else {
+    fdr <- mean(!res %in% Clade)
+  }
+
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+
+```
+
+```{r}
+ancombc_test <- function(X, meta, Clade, alpha = 0.1) {
+  # Create a SimpleList object for counts
+  assays <- SimpleList(counts = X)
+  
+  # Convert metadata to DataFrame format
+  smd <- DataFrame(meta)
+  
+  # Create a TreeSummarizedExperiment object
+  tse <- TreeSummarizedExperiment(assays = assays, colData = smd)
+  
+  # Run ANCOM-BC
+  out <- ancombc(
+    data = tse, assay_name = "counts",
+    formula = "Y",
+    p_adj_method = "BH", prv_cut = 0, alpha = alpha
+  )
+  
+  # Extract differentially abundant features
+  res <- rownames(out$feature_table)[which(out$res$diff_abn$Y == TRUE)]
+  
+  # Compute FDR
+  if (length(res) == 0) {
+    fdr <- 0
+  } else {
+    fdr <- mean(!res %in% Clade)
+  }
+  
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+```
+
+
+```{r}
+maaslin_test <- function(X, meta, Clade, alpha = 0.1) {
+  # Run Maaslin2 while suppressing output messages
+  invisible(capture.output(
+    fit_data <- Maaslin2(
+      t(X), meta, "demo_output",
+      min_prevalence = 0,
+      fixed_effects = c("Y"),
+      random_effects = c("batch"),
+      normalization = "NONE",
+      standardize = FALSE
+    )
+  ))
+  
+  # Extract significantly different features
+  res <- fit_data$results$feature[which(fit_data$results$qval < alpha)]
+  
+  # Compute FDR
+  if (length(res) == 0) {
+    fdr <- 0
+  } else {
+    fdr <- mean(!res %in% Clade)
+  }
+  
+  return(list("Sensitivity" = mean(Clade %in% res), "FDR" = fdr))
+}
+
+```
+
+```{r}
+m <- 5
+n <- 50
+alpha <- 0.1
+beta <- 0.01
+gamma <- 1
+
+d <- nrow(count)
+
+# Assign row names as "Taxon.1", "Taxon.2", ..., "Taxon.d"
+rownames(count) <- sapply(1:nrow(count), function(i) paste0("Taxon.", i))
+```
+
+```{r}
+# Define a helper function to streamline row creation
+generate_rows <- function(group, methods) {
+  rows <- lapply(methods, function(method) c(0, 0, group, method))
+  do.call(rbind, rows)
+}
+
+# Define the groups and methods
+groups <- c("Truth", "Unprocessed", "MetaDICT", "ConQuR", "ComBatSeq", "MMUPHin", "Percentile-Norm", "DEBIAS-M")
+methods <- c("t-test", "RDB", "LinDA", "ANCOMBC", "Maaslin2\n(batch as random effect)")
+
+# Generate the table
+df_rows <- lapply(groups, generate_rows, methods = methods)
+fdr_table <- do.call(rbind, df_rows)
+
+# Convert to a data frame for better usability
+colnames(fdr_table) <- c("FDR", "Sensitivity", "Group", "Method")
+fdr_table <- as.data.frame(fdr_table)
+fdr_table[,1] = as.numeric(fdr_table[,1])
+fdr_table[,2] = as.numeric(fdr_table[,2])
+```
+
+```{r}
+for (i in 1:500) {
+  # Initialize dataset
+  res <- init_dataset_da(m, n, count, dist, floor(0.05 * d), floor(0.02 * d), ez = 5, lib_var = TRUE, p = c(1/2, 1/2, 1/2, 1/2, 1/2))
+  O_list <- res[[1]]
+  X_t <- do.call(cbind, res[[3]])
+  diff_seq <- res[[4]]
+  meta_list <- res[[5]]
+  meta <- do.call(rbind, meta_list)
+
+  # filter out zero taxa
+  # Combine the list into a single matrix
+  O <- do.call(cbind, O_list)
+  
+  # Filter taxa with zero row sums
+  filtered_taxa <- rownames(count)[rowSums(O) == 0]
+  diff_seq <- diff_seq[!diff_seq %in% filtered_taxa]
+  
+  # Set row names for matrices
+  rownames(O) <- rownames(count)
+  rownames(X_t) <- rownames(count)
+  
+  # Filter out rows with zero row sums
+  non_zero_rows <- rowSums(O) != 0
+  O1 <- O[non_zero_rows, ]
+  O_list1 <- lapply(O_list, function(X) X[non_zero_rows, ])
+  X_t1 <- X_t[non_zero_rows, ]
+  dist1 <- dist[non_zero_rows, non_zero_rows]
+  
+  # Set column and row names for filtered matrices
+  colnames(O1) <- paste0("Sample", seq_len(nrow(meta)))
+  colnames(X_t1) <- paste0("Sample", seq_len(nrow(meta)))
+  rownames(meta) <- paste0("Sample", seq_len(nrow(meta)))
+
+  
+  
+  meta$batch <- as.factor(do.call(c, lapply(1:m, function(x) rep(x, n))))
+  batchid <- meta$batch
+  
+  write.csv(O1,paste0("../data/Simulation_data/figS11a/count/count_",i,".csv"))
+  write.csv(meta,paste0("../data/Simulation_data/figS11a/meta/meta_",i,".csv"))
+  save(O1,meta,O_list1,meta_list,diff_seq,O1,X_t1,dist1,file = paste0("../data/Simulation_data/figS11a/diff/diff_",i,".RData"))
+}
+```
+
+
+```{r,warning=FALSE,message=F}
+# Helper function for updating FDR table
+update_fdr_table <- function(k_offset, fdr_table, res_list) {
+  for (i in seq_along(res_list)) {
+    fdr_table[k_offset + i, 1:2] <- fdr_table[k_offset + i, 1:2] + c(res_list[[i]]$FDR, res_list[[i]]$Sensitivity)
+  }
+  return(fdr_table)
+}
+
+for(i in 1:500){
+  load(paste0("../data/Simulation_data/figS11a/diff/diff_",i,".RData"))
+  batchid <- meta$batch
+  Y <- as.factor(meta$Y)
+  
+  res.metadict <- metadict(O_list1, alpha, beta, gamma, dist1, meta_list)$X
+  colnames(res.metadict) <- colnames(O1)
+  rownames(res.metadict) <- rownames(O1)
+  
+  # Apply batch correction methods
+  res.conqur <- t(ConQuR(t(O1), batchid, batch_ref = 1, covariates = Y))
+  res.combatseq <- ComBat_seq(as.matrix(O1), batchid, Y)
+  res.mmuphin <- adjust_batch(feature_abd = O1, batch = "batch", covariates = "Y", data = meta)$feature_abd_adj
+  
+  print("mmuphin complete.")
+  
+  # Prepare for percentile normalization
+  O_ref <- t(O1) / colSums(O1)
+  O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 10^-6)
+  colnames(O_ref) <- rownames(O1)
+  rownames(O_ref) <- colnames(O1)
+  
+  res.percentile <- t(percentile_norm(O_ref, batchid, Y, 1))
+  print("percentile complete.")
+  
+  # Read debiasing results
+  res.debiasm <- t(read.csv(paste0("../data/Simulation_data/figS11a/result/debias_", i, ".csv"))[, -1])
+  colnames(res.debiasm) <- colnames(O1)
+  rownames(res.debiasm) <- rownames(O1)
+  
+  # List of datasets to process
+  data_to_test <- list(
+    list(X_t1, Y, diff_seq, 0),
+    list(O1, Y, diff_seq, 5),
+    list(res.metadict, Y, diff_seq, 10),
+    list(res.conqur, Y, diff_seq, 15),
+    list(res.combatseq, Y, diff_seq, 20),
+    list(res.mmuphin, Y, diff_seq, 25),
+    list(res.percentile, Y, diff_seq, 30),
+    list(res.debiasm, Y, diff_seq, 35)
+  )
+  
+  # Loop through datasets and apply statistical tests
+  for (item in data_to_test) {
+    data <- item[[1]]
+    Y <- item[[2]]
+    diff_seq <- item[[3]]
+    k_offset <- item[[4]]
+  
+    # Run differential abundance tests
+    res1 <- t_test(data, Y, diff_seq, alpha = 0.1, method = "BH")
+    res2 <- rdb_test(data, Y, diff_seq, alpha = 0.1)
+    res3 <- linda_test(data, meta, diff_seq, alpha = 0.1)
+    res4 <- ancombc_test(data, meta, diff_seq, alpha = 0.1)
+    res5 <- maaslin_test(data, meta, diff_seq, alpha = 0.1)
+  
+    print(k_offset)
+  
+    # Update FDR table
+    fdr_table <- update_fdr_table(k_offset, fdr_table, list(res1, res2, res3, res4, res5))
+  }
+
+print(i)
+}
+
+fdr_table[,1] = fdr_table[,1]/500
+fdr_table[,2] = fdr_table[,2]/500
+```
+

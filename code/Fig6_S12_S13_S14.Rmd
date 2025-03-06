@@ -1,0 +1,1229 @@
+```{r}
+library(ggpubr)
+library(dplyr)
+library(ggraph)
+library(stringr)
+library(ggplot2)
+library(scales)
+library(viridis)
+library(effsize)
+library(MBESS)
+library(MicrobiomeStat)
+library(reshape2)
+library(randomForest)
+library(caret)
+library(pROC)
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(sva)
+library(PLSDAbatch)
+library(ecodist)
+library(vegan)
+library(igraph)
+library(tidygraph)
+library(ggforce)
+```
+
+
+```{r}
+source("./function.R")
+```
+
+```{r}
+load("../data/Rawdata_Wirbel/motus_taxonomy_2.5.1.Rdata")
+
+# counts
+count <- read.table("../data/Rawdata_Wirbel/species_profiles_g2_l75_motus2.0.0.tsv",
+                   sep='\t',stringsAsFactors = FALSE,
+                   header = TRUE, check.names = FALSE, row.names = 1,
+                   quote='')
+
+meta <- readr::read_tsv("../data/Rawdata_Wirbel/meta_all.tsv")
+
+include_study <- c("FR-CRC","DE-CRC","CN-CRC","US-CRC","AT-CRC" )
+meta <- meta %>%
+  filter(Study %in% include_study) %>%
+  filter(Group %in% c('CTR', 'CRC'))
+
+meta$Group[meta$Group == "CTR"] <- "Control"
+all_taxonomy <- motus2.5_taxonomy
+count <- count[,meta$Sample_ID]
+```
+
+```{r}
+#load(url("https://github.com/AlessioMilanese/motus_taxonomy/blob/master/data/motus_taxonomy_2.5.1.Rdata?raw=true"))
+
+# adjust taxonomy format
+taxonomy <- str_split_fixed(rownames(count)," ",3)
+taxonomy <- as.data.frame(taxonomy)
+colnames(taxonomy) <- c("Genus","Species","OTU")
+taxonomy$taxa <- rownames(count)
+
+taxonomy$Species[str_detect(taxonomy$taxa,"alpha proteobacterium")] <- str_split_fixed(taxonomy$taxa[str_detect(taxonomy$taxa,"alpha proteobacterium")],"\\[",2)[,1]
+
+select_taxa <- which(str_detect(taxonomy$taxa,"alpha proteobacterium")==T)
+for(i in select_taxa){
+  taxonomy$Species[i] <- str_trim(taxonomy$Species[i], "right")
+  taxonomy$Genus[i] <- all_taxonomy$Genus[str_detect(all_taxonomy$Species,taxonomy$Species[i])][1]
+}
+
+taxonomy$Species[str_detect(taxonomy$taxa,"butyrate-producing")] <- str_split_fixed(taxonomy$taxa[str_detect(taxonomy$taxa,"butyrate-producing")],"\\[",2)[,1]
+select_taxa <- which(str_detect(taxonomy$taxa,"butyrate-producing")==T)
+for(i in select_taxa){
+  taxonomy$Species[i] <- str_trim(taxonomy$Species[i], "right")
+  taxonomy$Genus[i] <- all_taxonomy$Genus[str_detect(all_taxonomy$Species,taxonomy$Species[i])][1]
+}
+
+taxonomy$Species[str_detect(taxonomy$taxa,"uncultured")] <- str_split_fixed(taxonomy$taxa[str_detect(taxonomy$taxa,"uncultured")],"\\[",2)[,1]
+select_taxa <- which(str_detect(taxonomy$taxa,"uncultured")==T)
+for(i in select_taxa){
+  taxonomy$Species[i] <- str_trim(taxonomy$Species[i], "right")
+  if(taxonomy$Species[i]=="uncultured candidatus Thalassoarchaea euryarchaeot"){
+    taxonomy$Genus[i] <- "Euryarchaeota gen. incertae sedis"
+  }else{
+    taxonomy$Genus[i] <- all_taxonomy$Genus[str_detect(all_taxonomy$Species,taxonomy$Species[i])][1]
+  }
+}
+
+taxonomy$Genus[which(taxonomy$Genus=="unknown")] <- taxonomy$Species[which(taxonomy$Genus=="unknown")]
+
+select_taxa <- which(taxonomy$Genus=="candidatus")
+for(i in select_taxa){
+  taxonomy$Species[i] <- str_trim(taxonomy$Species[i], "right")
+  if(str_detect(taxonomy$taxa[i],"unknown")){
+    taxonomy$Species[i] <- str_split_fixed(taxonomy$taxa[i],"\\[",2)[1]
+    taxonomy$Genus[i] <- gsub("unknown", "", taxonomy$Species[i])
+  }else{
+    taxonomy$Genus[i] <- paste(taxonomy$Genus[i],taxonomy$Species[i])
+  }
+  taxonomy$Genus[i] <- gsub("candidatus", "Candidatus", taxonomy$Species[i])
+  taxonomy$Genus[i] <- str_trim(taxonomy$Genus[i], "left")
+  taxonomy$Genus[i] <- str_trim(taxonomy$Genus[i], "right")
+}
+
+taxonomy$Genus <- gsub("unknown ","",taxonomy$Genus)
+
+select_taxa <- which(taxonomy$Genus=="cand.")
+for(i in select_taxa){
+  taxonomy$Species[i] <- str_trim(taxonomy$Species[i], "right")
+  if(str_detect(taxonomy$taxa[i],"unknown")){
+    taxonomy$Species[i] <- str_split_fixed(taxonomy$taxa[i],"\\[",2)[1]
+    taxonomy$Genus[i] <- gsub("unknown", "", taxonomy$Species[i])
+  }else{
+    taxonomy$Genus[i] <- paste(taxonomy$Genus[i],taxonomy$Species[i])
+  }
+  taxonomy$Genus[i] <- gsub("candidatus", "Candidatus", taxonomy$Species[i])
+  taxonomy$Genus[i] <- str_trim(taxonomy$Genus[i], "left")
+  taxonomy$Genus[i] <- str_trim(taxonomy$Genus[i], "right")
+}
+
+taxonomy$Genus[which(taxonomy$Genus=="1730 Eubacterium")] <- "Eubacterium"
+taxonomy$Genus[which(taxonomy$Genus=="1485 Clostridium")] <- "Clostridium"
+taxonomy$Genus[which(taxonomy$Genus=="41275 Brevundimonas")] <- "Brevundimonas"
+taxonomy$Genus[which(taxonomy$Genus=="Candidatus Saccharibacteria")] <- "Saccharibacteria"
+
+taxonomy <- taxonomy[taxonomy$Genus!="cellular",]
+taxonomy$Genus[which(taxonomy$Genus=="bacterium")] <- "Bacterium"
+```
+
+```{r}
+#write.csv(taxonomy,"taxonomy.csv")
+```
+
+# Genus level analysis
+
+```{r}
+count <- as.data.frame(count)
+genus.name <- unique(taxonomy$Genus)
+genus.name <- genus.name[-length(genus.name)]
+
+# aggregate taxa to genus level
+count.genus <- matrix(0,nrow = length(genus.name),ncol = ncol(count))
+row_to_genus <- lapply(genus.name,function(x)taxonomy$taxa[which(taxonomy$Genus==x)])
+count.genus <- sapply(1:length(genus.name),function(i)colSums(count[row_to_genus[[i]],]))
+count.genus <- t(count.genus)
+rownames(count.genus) <- genus.name
+colnames(count.genus) <- colnames(count)
+count.genus <- as.data.frame(count.genus)
+count.genus <- count.genus[(rowSums(count.genus)>0),]
+
+# filter meta with common covariates across datasets
+meta_sub <- meta %>%
+  select("Sample_ID","Age","Gender","BMI","Study","Group") %>%
+  na.omit()
+
+count.genus <- count.genus[,meta_sub$Sample_ID]
+meta_sub$Study <- sapply(meta_sub$Study,function(x)strsplit(x,"-")[[1]][1])
+```
+
+```{r}
+write.csv(count.genus,paste0("../data/Rawdata_Wirbel/count.csv"))
+write.csv(meta_sub,paste0("../data/Rawdata_Wirbel/meta.csv"))
+```
+
+# data integration
+
+```{r}
+# Define the studies to include
+include_study <- c("FR", "DE", "CN", "US", "AT")
+
+# Create a list of sample IDs for each study
+sample_list <- lapply(include_study, function(x) {
+  meta_sub$Sample_ID[meta_sub$Study == x]
+})
+
+# For each study, subset the count.genus matrix using the corresponding sample IDs
+O.list <- lapply(seq_along(include_study), function(i) {
+  as.matrix(count.genus[, sample_list[[i]]])
+})
+
+
+# Subset meta to the columns of interest and reassign row names
+meta_sub1 <- meta_sub %>% 
+  select(Age, Gender, BMI, Group)
+rownames(meta_sub1) <- meta_sub$Sample_ID
+
+# Create a list of meta data for each study based on sample_list
+meta.list <- lapply(seq_along(include_study), function(i) {
+  meta_sub1[sample_list[[i]], ]
+})
+
+```
+
+
+## singular value for each dataset
+
+
+```{r}
+# Initialize an empty list to store results
+svd_results <- list()
+
+# Loop through each dataset in O.list
+for (i in seq_along(O.list)) {
+  svd_d <- svd(O.list[[i]])$d  # Get singular values
+  
+  # Create a temporary data frame for the current dataset
+  temp_df <- data.frame(
+    value = svd_d,
+    taxon = seq_along(svd_d),  # Correct indexing
+    dataset = include_study[i]
+  )
+  
+  # Store in list
+  svd_results[[i]] <- temp_df
+}
+
+# Combine all results into a single data frame
+svd_value <- do.call(rbind, svd_results)
+```
+
+
+```{r}
+p1 = ggplot(svd_results[[1]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    legend.text  = element_text(size = 10)
+  )
+p2 = ggplot(svd_results[[2]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+     plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+p3 = ggplot(svd_results[[3]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+     plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+p4 = ggplot(svd_results[[4]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+
+p5 = ggplot(svd_results[[5]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+
+p_arranged = ggarrange(p1,p2,p3,p4,p5,nrow=1)
+final_plot <- annotate_figure(p_arranged, 
+                top = text_grob("Singular Value of CRC Datasets", 
+                                face = "bold", size = 14))
+ggsave("../fig/crc_singular_val.jpeg", dpi = 300, units="in", width=20, height=4)
+```
+
+
+```{r}
+# Initialize distance matrix with 1
+dist.genus <- matrix(1,nrow=nrow(count.genus),ncol = nrow(count.genus))
+wrong_g <- c()
+for(i in 1:nrow(count.genus)){
+  name1 <- rownames(count.genus)[i]
+  f1 <- all_taxonomy$Family[str_detect(all_taxonomy$Genus,name1)][1]
+  if(is.na(f1)){
+      next
+    }
+  for(j in 1:nrow(count.genus)){
+    name2 <- rownames(count.genus)[j]
+    f2 <- all_taxonomy$Family[str_detect(all_taxonomy$Genus,name2)][1]
+    if(is.na(f2)){
+      wrong_g <- c(wrong_g,j)
+    }else{
+      if(f1 == f2){
+        dist.genus[i,j] <- 0
+      }
+    }
+  }
+}
+
+is.null(wrong_g)
+```
+
+```{r}
+execution_time <- system.time({
+alpha <- 1
+beta <- 0.01
+gamma <- 1
+metadict.res <- metadict(O.list,alpha,beta,gamma,dist.genus,meta.list,trace = 3)
+})
+```
+
+```{r}
+res_metadict <- metadict.res$X
+rownames(res_metadict) <- rownames(count.genus)
+colnames(res_metadict) <- colnames(count.genus)
+```
+
+```{r, warning=F}
+## other methods
+res_ComBatSeq <- sva::ComBat_seq(as.matrix(count.genus), meta_sub$Study, covar_mod = as.data.frame(meta_sub1))
+```
+
+```{r, warning=F}
+meta_sub <- as.data.frame(meta_sub)
+rownames(meta_sub) <- colnames(count.genus)
+res_mmuphin <- adjust_batch(
+    feature_abd = count.genus,
+    batch = "Study",
+    covariates = c("Age","Gender","BMI","Group"),
+    data = meta_sub
+  )$feature_abd_adj
+```
+```{r, warning=F}
+tax_tab <- t(count.genus)
+batchid <- factor(meta_sub$Study,levels = unique(meta_sub$Study), labels = 1:5)
+res_ConQuR <- t(ConQuR(tax_tab, batchid, batch_ref = 1, covariates = as.factor(meta_sub1$Group)))
+```
+
+```{r}
+O_ref <- t(count.genus)/colSums(count.genus)
+O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
+colnames(O_ref) <- rownames(count.genus)
+rownames(O_ref) <- colnames(count.genus)
+res_percentile <- t(percentile_norm(O_ref, meta_sub$Study, meta_sub$Group, "CRC"))
+
+O.clr <- microbiome::transform(count.genus, "clr")
+res_plsda <- t(PLSDA_batch(t(O.clr), Y.trt = meta_sub$Group, Y.bat = meta_sub$Study)$X.nobatch)
+```
+
+```{r}
+res_debiasm = t(read.csv("../data/Rawdata_Wirbel/debiasm_res.csv")[,-1])
+res_scanvi = t(read.csv("../data/Rawdata_Wirbel/scvi_res.csv")[,-1])
+```
+
+# counfounding effect between batch 
+
+```{r}
+p_age <- ggplot(meta_sub,aes(y = Age, x = Study, color = Study))+
+  geom_boxplot()+
+  scale_color_brewer(palette="Set1")+
+   geom_jitter(size=alpha, alpha=0.3,width = 0.2)+
+  theme_bw()
+
+p_bmi <- ggplot(meta_sub,aes(y = BMI, x = Study, color = Study))+
+  geom_boxplot()+
+    scale_color_brewer(palette="Set1")+
+   geom_jitter(size=alpha, alpha=0.3,width = 0.2)+
+  theme_bw()
+
+p_gender <- ggplot(meta_sub,aes(x = Study, group = Gender))+
+  geom_bar(aes(fill = Gender, width = 0.2),position = "dodge")+
+  geom_text(aes(label = ..count..), vjust = 1.5, position = position_dodge(.9),stat = "count",  colour = "white")+
+  scale_fill_brewer(palette="Set2")+
+  theme_bw()+
+ylab("Count")
+
+p_crc <-  ggplot(meta_sub,aes(x = Study, group = Group))+
+ geom_bar(aes(fill = Group, width = 0.2),position = "dodge")+
+  geom_text(aes(label = ..count..), vjust = 1.5, position = position_dodge(.9),stat = "count",  colour = "white")+
+  theme_bw()+
+ylab("Count")
+```
+
+```{r}
+# S10 a
+ggarrange(p_age,p_bmi,p_gender,p_crc,nrow=1)
+ggsave("../fig/rd_batch_cov.jpeg", dpi=300, units="in", width=17, height=3)
+```
+
+# counfounding effect between study
+
+```{r}
+p_age_crc <- ggplot(meta_sub,aes(y = Age, x = Group, color = Group))+
+  geom_boxplot()+
+  scale_color_brewer(palette="Set1")+
+   geom_jitter(size=alpha, alpha=0.3,width = 0.2)+
+  theme_bw()
+
+p_bmi_crc <- ggplot(meta_sub,aes(y = BMI, x = Group, color = Group))+
+  geom_boxplot()+
+    scale_color_brewer(palette="Set1")+
+   geom_jitter(size=alpha, alpha=0.3,width = 0.2)+
+  theme_bw()
+
+p_gender_crc <- ggplot(meta_sub,aes(x = Group, group = Gender))+
+  geom_bar(aes(fill = Gender, width = 0.2),position = "dodge")+
+  geom_text(aes(label = ..count..), vjust = 1.5, position = position_dodge(.9),stat = "count",  colour = "white")+
+  scale_fill_brewer(palette="Set2")+
+  theme_bw()+
+ylab("Count")
+
+# S10 b
+ggarrange(p_age_crc,p_bmi_crc,p_gender_crc,nrow=1)
+ggsave("../fig/rd_crc_cov.jpeg", dpi=300, units="in", width=15, height=3)
+```
+
+# R2 analysis
+
+## Before-analysis permanova of confounders.
+
+```{r}
+permanova <- function(P, Y, distance = "bray-curtis") {
+  if(distance == "bray-curtis"){
+    distP = bcdist(t(P))
+  }else if(distance == "euclidean"){
+    distP = dist(t(P),method = "euclidean")
+  }
+  
+  df.Y = as.data.frame(Y)
+  Re = adonis2(distP~., data = df.Y)
+  return(Re$R2[1])
+}
+```
+
+```{r}
+R2_mat <- data.frame("all_before" = numeric(),"Variable" = character())
+for(i in 2:ncol(meta_sub)){
+  R2_mat[i-1,2] <- colnames(meta_sub)[i]
+  R2_mat[i-1,1] <- permanova(count.genus,meta_sub[,i])
+}
+rownames(R2_mat) <- R2_mat$Variable
+
+R2_mat$metadict <- sapply(2:6,function(i)permanova(X,meta_sub[,i]))
+R2_mat$combatseq <- sapply(2:6,function(i)permanova(res_ComBatSeq,meta_sub[,i]))
+R2_mat$mmuphin <- sapply(2:6,function(i)permanova(res_mmuphin,meta_sub[,i]))
+R2_mat$conqur <- sapply(2:6,function(i)permanova(res_ConQuR,meta_sub[,i]))
+R2_mat$percentile <- sapply(2:6,function(i)permanova(res_percentile,meta_sub[,i]))
+R2_mat$debiasm <- sapply(2:6,function(i)permanova(res_debiasm,meta_sub[,i]))
+R2_mat$PLSDA <- sapply(2:6,function(i)permanova(res_plsda,meta_sub[,i],"euclidean"))
+R2_mat$scANVI <- sapply(2:6,function(i)permanova(res_scanvi,meta_sub[,i],"euclidean"))
+
+colnames(R2_mat) <- c("Unprocessed", "ID", "MetaDICT", "ComBatSeq", "MMUPHin", "ConQuR", "Percentile-Norm", "DEBIAS-M", "PLSDA-batch", "scANVI")
+rownames(R2_mat)[5] <- "CRC/Control"
+R2_mat$ID <- rownames(R2_mat)
+```
+
+```{r}
+gg <- melt(R2_mat, id="ID")
+gg$R2 <- as.numeric(gg$value)
+gg$ID <- factor(gg$ID,levels = c("CRC/Control","Age","BMI","Gender","Study"))
+gg$variable <- factor(gg$variable,levels=c("Unprocessed","MetaDICT", "ComBatSeq", "MMUPHin", "ConQuR", "Percentile-Norm", "DEBIAS-M","PLSDA-batch", "scANVI"))
+```
+
+```{r}
+# fig 6a
+p <- ggplot(gg, aes(x = variable, y = ID, fill = R2, label = percent(R2, accuracy = 0.01))) +
+  geom_tile() +
+  geom_text(color = "black", na.rm = TRUE, face = "bold") +
+  # Updated color gradient (low = bright yellow, high = deep purple)
+  scale_fill_gradient(low = "lightblue", high = "darkblue",na.value = "white") +
+  labs(
+    x = "",
+    y = "",
+    title = "Explained Variance"
+  ) +
+  theme_bw(base_family = "Georgia") +
+  theme(
+    axis.text.x = element_text(face = "bold", size = 12, angle = 45, hjust = 1),
+    axis.text.y = element_text(face = "bold", size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "none"
+  ) +
+  coord_fixed()
+
+p
+ggsave("../fig/rd_r2.jpeg",dpi=300,units="in", width=15, height=6)
+```
+
+## PCoA plots
+
+```{r}
+p1_0 <- pcoa.plot.discrete(count.genus,meta_sub$Study,"Unprocessed", pointsize = 0.5)
+p1_1 <- pcoa.plot.discrete(res_metadict,meta_sub$Study,"MetaDICT",pointsize = 0.5)
+p1_2 <- pcoa.plot.discrete(res_ComBatSeq,meta_sub$Study,"CombatSeq",pointsize = 0.5)
+p1_3 <- pcoa.plot.discrete(res_mmuphin,meta_sub$Study,"MMUPHin",pointsize = 0.5)
+p1_4 <- pcoa.plot.discrete(res_ConQuR,meta_sub$Study,"ConQuR",pointsize = 0.5)
+p1_5 <- pcoa.plot.discrete(res_percentile,meta_sub$Study,"Percentile-Norm",pointsize = 0.5)
+p1_6 <- pcoa.plot.discrete(res_debiasm,meta_sub$Study,"DEBIAS-M",pointsize = 0.5)
+p1_7 <- pcoa.plot.discrete(res_plsda,meta_sub$Study,"PLSDA-batch",pointsize = 0.5,distance = "euclidean")
+p1_8 <- pcoa.plot.discrete(res_scanvi,meta_sub$Study,"scANVI",pointsize = 0.5,distance = "euclidean")
+```
+
+```{r}
+p2_0 <- pcoa.plot.discrete(count.genus,meta_sub$Group,"Unprocessed",pointsize = 0.5,colorset = "Dark2")
+p2_1 <- pcoa.plot.discrete(res_metadict,meta_sub$Group,"MetaDICT",pointsize = 0.5,colorset = "Dark2")
+p2_2 <- pcoa.plot.discrete(res_ComBatSeq,meta_sub$Group,"CombatSeq",pointsize = 0.5,colorset = "Dark2")
+p2_3 <- pcoa.plot.discrete(res_mmuphin,meta_sub$Group,"MMUPHin",pointsize = 0.5,colorset = "Dark2")
+p2_4 <- pcoa.plot.discrete(res_ConQuR,meta_sub$Group,"ConQuR",pointsize = 0.5,colorset = "Dark2")
+p2_5 <- pcoa.plot.discrete(res_percentile,meta_sub$Group,"Percentile-Norm",pointsize = 0.5,colorset = "Dark2")
+p2_6 <- pcoa.plot.discrete(res_debiasm,meta_sub$Group,"DEBIAS-M",pointsize = 0.5,colorset = "Dark2")
+p2_7 <- pcoa.plot.discrete(res_plsda,meta_sub$Group,"PLSDA-batch",pointsize = 0.5,distance = "euclidean",colorset = "Dark2")
+p2_8 <- pcoa.plot.discrete(res_scanvi,meta_sub$Group,"scANVI",pointsize = 0.5,distance = "euclidean",colorset = "Dark2")
+```
+
+```{r}
+# fig 6b
+ggarrange(p1_0,p1_1,p1_2,p1_3,p1_4,p1_5,p1_6,p1_7,p1_8,nrow = 1,ncol = 9, common.legend = T, legend="bottom")
+ggsave("../fig/rd_pcoa_batch.jpeg",dpi=300, units="in", width=20, height=3)
+
+ggarrange(p2_0,p2_1,p2_2,p2_3,p2_4,p2_5,p2_6,p2_7,p2_8,nrow = 1,ncol = 9, common.legend = T, legend="bottom")
+ggsave("../fig/rd_pcoa_crc.jpeg",dpi=300, units="in", width=20, height=3)
+```
+
+# Community detection
+
+## Taxa community detection
+
+```{r}
+taxa_groups <- function(cluster.res) {
+  lapply(unique(cluster.res), function(cluster_id) {
+    rownames(count.genus)[cluster.res == cluster_id]
+  })
+}
+```
+
+```{r}
+D <- metadict.res$D
+res <- community_detection(D[,1:50], K=2, method = "Walktrap", min_k = 2)
+cluster.res <- res$cluster
+function_group <- taxa_groups(cluster.res)
+```
+
+```{r}
+# Assuming D is your matrix
+singular_values <- svd(D)$d
+data <- data.frame(Index = seq_along(singular_values), SingularValue = singular_values)
+
+ggplot(data, aes(x = Index, y = SingularValue)) +
+  geom_point() +
+  labs(x = "", y = "Singular Value of D") +
+  scale_x_continuous(breaks = c(50, 100, 150, 200)) +
+  theme_bw()
+ggsave("../fig/D_svd_realdata.jpeg",dpi = 300)
+```
+
+
+```{r}
+edges <- E(res$graph)
+edge_node <- c(0,0)
+for(i in 1:length(edges)){
+  edge_node <- rbind(edge_node,ends(res$graph, edges[i]))
+}
+edge_node <- edge_node[-1,]
+```
+
+```{r}
+color_list = c(
+  "dodgerblue2",  # bright blue
+  "#E31A1D",      # bright red
+  "green4",       # dark green
+  "#6A3D9A",      # purple
+  "#FF7F00",      # orange
+  "gold1",        # bright yellow
+  "skyblue2",     # light blue
+  "#FB9A99",      # light pink
+  "palegreen2",   # pale green
+  "#CAB2D6",      # light purple
+  "#FDBF6F",      # light orange
+  "gray70",       # light gray
+  "khaki2",       # khaki
+  "maroon",       # dark red
+  "orchid1",      # orchid
+  "deeppink1",    # deep pink
+  "blue1",        # deep blue
+  "steelblue4",   # dark steel blue
+  "turquoise",    # turquoise
+  "green1",       # bright green
+  "yellow4",      # dark yellow
+  "yellow3",      # medium yellow
+  "darkorange4",  # dark orange
+  "brown1",       # brown
+  "#FF69B4",      # hot pink
+  "#8B0000",      # dark red
+  "#4682B4",      # steel blue
+  "#9ACD32",      # yellow green
+  "#B22222",      # firebrick red
+  "#8A2BE2",      # blue violet
+  "#FF4500",      # orange red
+  "green3",       # bright green
+  "blue4"         # cadet blue
+)
+
+# Set seed for reproducibility
+set.seed(2015)
+
+# Convert your igraph object (res$graph) to a tbl_graph object
+tbl_graph_obj <- as_tbl_graph(res$graph)
+
+# Ensure nodes have a 'cluster' attribute and compute node sizes based on degree
+tbl_graph_obj <- tbl_graph_obj %>%
+  activate(nodes) %>%
+  mutate(
+    cluster = as.factor(cluster.res),              # convert cluster.res to factor
+    size = scales::rescale(log(degree(.)), to = c(5, 14)),  # adjust node sizes
+    name = rownames(count.genus)
+  )
+
+# Compute layout coordinates using Fruchterman-Reingold
+layout_df <- create_layout(tbl_graph_obj, layout = "fr")
+
+# For communities 1, 2, and 9, compute circle center and radius:
+# For each community, the center is the mean x and y, and the radius is the maximum distance to the center plus a small margin.
+circle_data <- layout_df %>%
+  filter(cluster %in% c("1", "2", "9")) %>%
+  group_by(cluster) %>%
+  summarise(
+    center_x = mean(x),
+    center_y = mean(y),
+    radius = max(sqrt((x - mean(x))^2 + (y - mean(y))^2)) + 3.5
+  )
+
+set.seed(2015)
+# Create the network plot with ggraph
+p <- ggraph(tbl_graph_obj, layout = "fr") +
+  # Draw edges with slight curvature and semi-transparent dark gray color
+  geom_edge_link(color = adjustcolor("Gray", alpha.f = 0.5),
+                 width = 0.5, curvature = 0.8) +
+  # Draw nodes, coloring them by cluster and sizing them by the computed size (no legend)
+  geom_node_point(aes(color = cluster, size = size,), show.legend = TRUE, alpha = 0.7) +
+  # Conditionally label nodes only for communities 1, 2, and 9
+  geom_node_text(aes(label = ifelse(cluster %in% c("1", "2", "9"), name, "")),
+                 family = "Georgia", repel = TRUE, size = 4, color = "black", fontface = "bold") +
+  # Add dashed circles for communities 1, 2, and 9 using the computed circle_data
+  geom_circle(data = circle_data, aes(x0 = center_x, y0 = center_y, r =  radius, color = cluster),
+            inherit.aes = FALSE,  linetype = "dashed", size = 0.5) +
+  # Apply your manual color scale (adjust as needed for your color_list)
+  scale_color_manual(
+    name = "Microbial Community",
+    values = color_list[1:length(unique(cluster.res))]
+  ) +
+  # Use identity scaling for node sizes since they’re pre-computed
+  scale_size_identity() +
+
+  # Use a minimal theme to keep the plot clean
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12),
+    legend.position = "right"
+  ) 
+# Save the plot as a high-resolution JPEG file
+ggsave("../fig/rd_taxa_community_ggplot.jpeg",
+       plot = p, width = 13, height = 11, units = "in", dpi = 500)
+```
+
+
+```{r}
+# Create a data frame with genus names
+genus.name <- data.frame(Genus = rownames(count.genus), stringsAsFactors = FALSE)
+
+# Map taxonomic information using the all_taxonomy lookup
+genus.name$Family <- sapply(genus.name$Genus, function(i) {
+  all_taxonomy$Family[str_detect(all_taxonomy$Genus, i)][1]
+})
+genus.name$Order <- sapply(genus.name$Genus, function(i) {
+  all_taxonomy$Order[str_detect(all_taxonomy$Genus, i)][1]
+})
+genus.name$Class <- sapply(genus.name$Genus, function(i) {
+  all_taxonomy$Class[str_detect(all_taxonomy$Genus, i)][1]
+})
+genus.name$Phylum <- sapply(genus.name$Genus, function(i) {
+  all_taxonomy$Phylum[str_detect(all_taxonomy$Genus, i)][1]
+})
+
+# Assign clustering results
+genus.name$cluster <- cluster.res
+
+# Function to extract the second word from a string
+extract_second_word <- function(x) {
+  parts <- stringr::str_split(x, " ")[[1]]
+  if (length(parts) >= 2) parts[2] else NA
+}
+
+# Update Class and Phylum by extracting the second word
+genus.name$Class <- sapply(genus.name$Class, extract_second_word)
+genus.name$Class[is.na(genus.name$Class)] <- "Unknown"
+
+genus.name$Phylum <- sapply(genus.name$Phylum, extract_second_word)
+genus.name$Phylum[is.na(genus.name$Phylum)] <- "Unknown"
+
+# Group less common phyla under "Others"
+common_phyla <- c("Firmicutes", "Proteobacteria", "Actinobacteria", 
+                  "Bacteroidetes", "Fusobacteria", "Chloroflexi")
+genus.name$Phylum[!genus.name$Phylum %in% common_phyla] <- "Others"
+
+```
+
+```{r}
+shuffle_res <- replicate(1000, {
+  test <- sample(genus.name$Phylum, nrow(genus.name))
+  mean(apply(edge_node, 1, function(x) test[x[1]] == test[x[2]]))
+})
+
+mean(shuffle_res)
+```
+
+```{r}
+mean(apply(edge_node,1,function(x)genus.name$Phylum[x[1]]==genus.name$Phylum[x[2]]))
+```
+
+
+# Differential abundance test
+
+```{r}
+alpha <- 0.1
+out1 <- linda(res_metadict/mean(res_metadict)*mean(as.matrix(count.genus)),meta_sub,formula = "~Group+Age+Gender+BMI+Study",
+           p.adj.method = "BH", alpha = alpha)
+```
+
+```{r}
+p.anc.metadict <- out1$output$GroupCRC$padj
+diff.metadict <- out1$output$GroupCRC$reject
+```
+
+```{r}
+logfold.metadict <- out1$output$GroupCRC$log2FoldChange
+diff.status.metadict <- rep("Not Differentially Abundant",length(diff.metadict))
+diff.status.metadict[diff.metadict == T & logfold.metadict>0] <- rep("More Abundant in CRC")
+diff.status.metadict[diff.metadict == T & logfold.metadict<0] <- rep("More Abundant in Control")
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(2015)
+
+# Define a shorter color list (one color for each differential status)
+color_list <- c("grey", "green4", "#E31A1C")
+
+# Define the order of the differential status labels (adjust as needed)
+order_list <- unique(diff.status.metadict)
+
+# Convert your igraph object (res$graph) to a tbl_graph object
+tbl_graph_obj <- as_tbl_graph(res$graph)
+
+# Ensure nodes have a 'cluster' attribute, compute node sizes based on degree,
+# and add the differential status as a node attribute
+tbl_graph_obj <- tbl_graph_obj %>%
+  activate(nodes) %>%
+  mutate(
+    cluster = as.factor(cluster.res),                              # Convert cluster.res to factor
+    size = scales::rescale(log(degree(.)), to = c(5, 14)),           # Adjust node sizes
+    name = rownames(count.genus),                                  # Set node names
+    diff_status = factor(diff.status.metadict, levels = order_list)  # Add differential status as a factor
+  )
+
+set.seed(2015)
+# Create the network plot with ggraph
+p <- ggraph(tbl_graph_obj, layout = "fr") +
+  # Draw edges with slight curvature and semi-transparent gray color
+  geom_edge_link(
+    color = adjustcolor("Gray", alpha.f = 0.5),
+    width = 0.5, curvature = 0.8
+  ) +
+  # Map node color to the diff_status variable and size to the pre-computed size
+  geom_node_point(aes(color = diff_status, size = size), alpha = 0.6) +
+  # Conditionally label nodes for differentially abundant taxa (i.e., not "Not Differentially Abundant")
+  geom_node_text(
+    aes(label = ifelse(diff_status != "Not Differentially Abundant", name, "")),
+    family = "Georgia", repel = TRUE, size = 4, color = "black",fontface = "bold"
+  ) +
+  # Apply a manual color scale for the differential status (legend will be shown)
+  scale_color_manual(
+    name = "Differential Abundance",
+    values = color_list
+  ) +
+  # Use identity scaling for node sizes since they're pre-computed
+  scale_size_identity() +
+  # Use a minimal theme to keep the plot clean
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    axis.ticks = element_blank(),
+    plot.background = element_rect(fill = "white", color = NA),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12)
+  )
+
+
+ggsave("../fig/rd_diff_ggplot.jpeg",plot = p, width = 11.5, height = 11, units = "in", dpi = 500)
+```
+
+```{r,warning=F}
+# Run Linda analysis on each of the five datasets
+outputs <- lapply(seq_along(O.list), function(i) {
+  linda(O.list[[i]], meta.list[[i]], 
+        formula = "~Group+Age+Gender+BMI", 
+        p.adj.method = "BH", 
+        alpha = alpha)
+})
+
+# Extract adjusted p-values for GroupCRC from each output
+p_anc <- lapply(outputs, function(out) out$output$GroupCRC$padj)
+
+# Extract rejection decisions for GroupCTR from each output
+diff_anc <- lapply(outputs, function(out) out$output$GroupCTR$reject)
+
+# Name the outputs corresponding to each study
+study_names <- c("FR", "DE", "CN", "US", "AT")
+names(p_anc) <- study_names
+names(diff_anc) <- study_names
+
+# Create a data frame with p-values, including MetaDICT's results
+pval1 <- data.frame(
+  genus = rownames(count.genus),
+  MetaDICT = p.anc.metadict,
+  FR  = p_anc[["FR"]],
+  DE  = p_anc[["DE"]],
+  CN  = p_anc[["CN"]],
+  US  = p_anc[["US"]],
+  AT  = p_anc[["AT"]],
+  stringsAsFactors = FALSE
+)
+
+# Subset rows where at least one p-value (columns 2 to 7) is below alpha
+pval <- pval1[rowSums(pval1[, 2:7] < alpha) > 0, ]
+
+# Order the resulting data frame by the MetaDICT p-values
+pval <- pval[order(pval$MetaDICT), ]
+```
+
+```{r}
+# S13: Visualization of Adjusted p-values
+
+# Reshape the p-value data frame from wide to long format
+gg1 <- melt(pval, id.vars = "genus")
+gg1$qval <- as.numeric(gg1$value)
+
+# Define significance levels based on q-value thresholds
+gg1$significance <- NA
+gg1$significance[gg1$qval < 0.001] <- "***"
+gg1$significance[gg1$qval < 0.01 & gg1$qval >= 0.001] <- "**"
+gg1$significance[gg1$qval < alpha & gg1$qval >= 0.01] <- "*"
+
+# Remove unknown species
+gg1 <- gg1[!gg1$genus %in% c("cand.", "bacterium"), ]
+
+# Create a tile plot with the adjusted p-values
+p <- ggplot(gg1, aes(x = genus, y = variable, fill = qval, label = significance)) +
+  geom_tile() +
+  geom_text(color = "black", na.rm = TRUE, angle = 90)+
+  scale_fill_gradient2(high = "#DA9599", low = "#F9EFEF", midpoint = median(gg1$qval, na.rm = TRUE)) +
+  xlab("") +
+  ylab("") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+    legend.position = "bottom"
+  ) +
+  guides(fill = guide_colourbar(title = "Adjusted p-value"))
+
+# Display the plot
+print(p)
+ggsave("../fig/rd_qval.jpeg",dpi=300,units="in", width=15, height=5)
+```
+
+
+# Prediction
+
+```{r}
+set.seed(2024)
+seeds <- vector(mode = "list", length = 6)
+for(i in 1:5) seeds[[i]]<- sample.int(n=1000, 3)
+seeds[[6]] <- sample.int(n=1000, 1)
+```
+
+```{r}
+RF_pred <- function(train,test,trainy,testy){
+  control <- trainControl(method = "cv",          # Cross-validation
+                          number = 5,             # Number of folds
+                          summaryFunction = twoClassSummary,  # For ROC
+                          classProbs = TRUE,
+                          seeds = seeds)       # Enable probabilities for ROC
+  dataset <- data.frame(trainy,t(train))
+  rf <- train(trainy~., data=dataset, 
+                  method="rf", 
+                  metric='ROC',
+                  trControl=control,
+                  ntree = 500)
+    test_pred <- predict(rf, newdata = t(test))
+  actual <- testy
+  roc_object <- roc(actual,as.numeric(test_pred))
+  return(auc(roc_object))
+}
+```
+
+```{r}
+predict_task <- function(data, batchid, group, method) {
+  # Identify unique batches/studies
+  include_study <- unique(batchid)
+  nbatch <- length(include_study)
+  
+  # Initialize lists to store data and group labels for each batch
+  data.list <- vector("list", nbatch)
+  y.list <- vector("list", nbatch)
+  
+  for (i in seq_len(nbatch)) {
+    idx <- which(batchid == include_study[i])
+    data.list[[i]] <- data[, idx]
+    y.list[[i]] <- group[idx]
+  }
+  
+  # Initialize vectors to accumulate prediction results and corresponding metadata
+  pred_res <- numeric()
+  train <- character()
+  test <- character()
+  type <- character()
+  
+  # Cross-prediction between all pairs of batches
+  for (i in seq_len(nbatch)) {
+    for (j in seq_len(nbatch)) {
+      auc <- RF_pred(
+        data.list[[i]], data.list[[j]], 
+        as.factor(y.list[[i]]), as.factor(y.list[[j]])
+      )
+      pred_res <- c(pred_res, auc)
+      train <- c(train, include_study[i])
+      test <- c(test, include_study[j])
+      type <- c(type, method)
+    }
+  }
+  
+  # Integrated data prediction:
+  # Use samples from all batches except the current one as training data
+  for (j in seq_len(nbatch)) {
+    idx <- which(batchid != include_study[j])
+    auc <- RF_pred(
+      data[, idx], data.list[[j]],
+      as.factor(group[idx]), as.factor(y.list[[j]])
+    )
+    pred_res <- c(pred_res, auc)
+    train <- c(train, "LOSO")
+    test <- c(test, include_study[j])
+    type <- c(type, method)
+  }
+  
+  # Combine results into a data frame
+  pred_ac_res <- data.frame(
+    AUCROC = pred_res,
+    Train = train,
+    Test = test,
+    Type = type,
+    stringsAsFactors = FALSE
+  )
+  
+  return(pred_ac_res)
+}
+
+```
+
+```{r}
+set.seed(2025)
+pred_unprocessed <- predict_task(count.genus, meta_sub$Study, meta_sub$Group, "Unprocessed")
+pred_metadict <- predict_task(res_metadict, meta_sub$Study, meta_sub$Group, "MetaDICT")
+pred_combatseq <- predict_task(res_ComBatSeq, meta_sub$Study, meta_sub$Group, "ComBatSeq")
+pred_mmuphin <- predict_task(res_mmuphin, meta_sub$Study, meta_sub$Group, "MMUPHin")
+pred_conqur <- predict_task(res_ConQuR, meta_sub$Study, meta_sub$Group, "ConQuR")
+pred_plsda <- predict_task(res_plsda, meta_sub$Study, meta_sub$Group, "PLSDA-batch")
+pred_percentile <- predict_task(res_percentile, meta_sub$Study, meta_sub$Group, "Percentile-Norm")
+pred_scanvi <- predict_task(res_scanvi, meta_sub$Study, meta_sub$Group, "scANVI")
+pred_debiasm <- predict_task(res_debiasm, meta_sub$Study, meta_sub$Group, "DEBIAS-M")
+```
+
+```{r}
+# Combine all prediction results into a single data frame
+pred_ac_res <- rbind(
+  pred_unprocessed,
+  pred_metadict,
+  pred_combatseq,
+  pred_mmuphin,
+  pred_conqur,
+  pred_plsda,
+  pred_percentile,
+  pred_scanvi,
+  pred_debiasm
+)
+
+# Get unique methods and training set identifiers
+methods   <- unique(pred_ac_res$Type)
+train_set <- unique(pred_ac_res$Train)
+
+# For each method, compute the average AUCROC for each training set 
+# (excluding self-predictions) and append the results
+for (m in methods) {
+  avg_values <- sapply(train_set, function(tr) {
+    mean(pred_ac_res$AUCROC[
+      pred_ac_res$Train == tr & 
+      pred_ac_res$Test != tr & 
+      pred_ac_res$Type == m
+    ])
+  })
+  
+  avg_df <- data.frame(
+    AUCROC = avg_values,
+    Train  = train_set,
+    Type   = m,
+    Test   = "Average",
+    stringsAsFactors = FALSE
+  )
+  
+  pred_ac_res <- rbind(pred_ac_res, avg_df)
+}
+
+# Set AUCROC values to NA for self-predictions (where Train equals Test)
+pred_ac_res$AUCROC[pred_ac_res$Train == pred_ac_res$Test] <- NA
+
+# Initialize the Fill column
+pred_ac_res$Fill <- "same"
+
+# Compare each method's AUCROC to MetaDICT and assign Fill labels accordingly
+for (m in methods) {
+  if (m != "MetaDICT") {
+    # Extract MetaDICT's AUCROC values and the current method's values
+    auc_meta   <- pred_ac_res$AUCROC[pred_ac_res$Type == "MetaDICT"]
+    auc_method <- pred_ac_res$AUCROC[pred_ac_res$Type == m]
+    
+    # Calculate the difference: MetaDICT - current method
+    diff <- auc_meta - auc_method
+    
+    # Print the proportion where MetaDICT outperforms the current method
+    print(mean(diff[!is.na(diff)] > 0))
+    
+    # Identify the indices corresponding to the current method
+    idx <- which(pred_ac_res$Type == m)
+    
+    # Note: The following assignment assumes that the ordering in 'diff' 
+    # aligns with the ordering of pred_ac_res rows for the current method.
+    pred_ac_res$Fill[idx][which(diff > 0)] <- "high"
+    pred_ac_res$Fill[idx][which(diff < 0)] <- "low"
+    pred_ac_res$Fill[idx][which(diff == 0)] <- "same"
+  }
+}
+```
+
+```{r}
+write.csv(pred_ac_res,"../result/realdata_rf1.csv")
+```
+
+
+## negative control
+
+```{r}
+set.seed(2025)
+meta.list.nc <- list()
+for(i in 1:length(O.list)){
+  meta.list.nc[[i]] <- data.frame("Y" = paste("Group",rbinom(ncol(O.list[[i]]),1,0.5)))
+}
+meta.nc = do.call("rbind",meta.list.nc)
+```
+
+
+```{r}
+# MetaDICT normalization using non-contaminated data
+metadict.res.nc <- metadict(
+  O.list, alpha, beta, gamma, dist.genus, meta.list.nc, trace = 3
+)
+
+## Other methods
+
+# ComBat-Seq normalization
+res_ComBatSeq.nc <- sva::ComBat_seq(
+  as.matrix(count.genus), 
+  meta_sub$Study, 
+  covar_mod = as.data.frame(meta.nc)
+)
+
+# MMUPHin normalization
+meta.nc$Study <- meta_sub$Study
+rownames(meta.nc) <- colnames(count.genus)
+res_mmuphin.nc <- adjust_batch(
+  feature_abd = count.genus,
+  batch = "Study",
+  covariates = c("Y"),
+  data = meta.nc
+)$feature_abd_adj
+
+# ConQuR normalization
+tax_tab <- t(count.genus)
+batchid <- factor(
+  meta_sub$Study,
+  levels = unique(meta_sub$Study),
+  labels = 1:5
+)
+res_ConQuR.nc <- t(ConQuR(
+  tax_tab, batchid, batch_ref = 1, 
+  covariates = as.factor(meta.nc$Y)
+))
+
+# Percentile normalization
+O_ref <- t(count.genus) / colSums(count.genus)
+O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 1e-6)
+colnames(O_ref) <- rownames(count.genus)
+rownames(O_ref) <- colnames(count.genus)
+res_percentile.nc <- t(percentile_norm(O_ref, meta.nc$Study, meta.nc$Y, "Group 1"))
+
+# PLSDA batch correction after CLR transformation
+O.clr <- microbiome::transform(count.genus, "clr")
+res_plsda.nc <- t(PLSDA_batch(
+  t(O.clr), Y.trt = meta.nc$Y, Y.bat = meta.nc$Study
+)$X.nobatch)
+
+# Load external results for DEBIAS-M and scANVI
+res_debiasm.nc <- t(read.csv("../data/Rawdata_Wirbel/debiasm_res_nc.csv")[, -1])
+res_scanvi.nc  <- t(read.csv("../data/Rawdata_Wirbel/scvi_res_nc.csv")[, -1])
+
+# Format MetaDICT results as a data frame with proper row/column names
+res_metadict.nc <- data.frame(metadict.res.nc$X)
+rownames(res_metadict.nc) <- rownames(count.genus)
+colnames(res_metadict.nc) <- colnames(count.genus)
+```
+
+```{r}
+set.seed(2025)
+meta.nc$Y <- factor(meta.nc$Y,labels = c("G1","G2"))
+pred_unprocessed <- predict_task(count.genus, meta_sub$Study, meta.nc$Y, "Unprocessed")
+pred_metadict <- predict_task(res_metadict.nc, meta_sub$Study, meta.nc$Y, "MetaDICT")
+pred_combatseq <- predict_task(res_ComBatSeq.nc, meta_sub$Study, meta.nc$Y, "ComBatSeq")
+pred_mmuphin <- predict_task(res_mmuphin.nc, meta_sub$Study, meta.nc$Y, "MMUPHin")
+pred_conqur <- predict_task(res_ConQuR.nc, meta_sub$Study, meta.nc$Y, "ConQuR")
+pred_plsda <- predict_task(res_plsda.nc, meta_sub$Study, meta.nc$Y, "PLSDA-batch")
+pred_percentile <- predict_task(res_percentile.nc, meta_sub$Study, meta.nc$Y, "Percentile-Norm")
+pred_scanvi <- predict_task(res_scanvi.nc, meta_sub$Study, meta.nc$Y, "scANVI")
+pred_debiasm <- predict_task(res_debiasm.nc, meta_sub$Study, meta.nc$Y, "DEBIAS-M")
+```
+
+```{r}
+# Combine all prediction results into a single data frame
+pred_ac_res <- rbind(
+  pred_unprocessed,
+  pred_metadict,
+  pred_combatseq,
+  pred_mmuphin,
+  pred_conqur,
+  pred_plsda,
+  pred_percentile,
+  pred_scanvi,
+  pred_debiasm
+)
+
+# Get unique methods and training set identifiers
+methods   <- unique(pred_ac_res$Type)
+train_set <- unique(pred_ac_res$Train)
+
+# Loop over each method to compute the average AUCROC 
+# for each training set (excluding self-predictions)
+for (m in methods) {
+  avg_values <- sapply(train_set, function(tr) {
+    mean(pred_ac_res$AUCROC[
+      pred_ac_res$Train == tr & 
+      pred_ac_res$Test != tr & 
+      pred_ac_res$Type == m
+    ])
+  })
+  
+  # Create a data frame with the average values for current method
+  avg_df <- data.frame(
+    AUCROC = avg_values,
+    Train  = train_set,
+    Type   = rep(m, length(train_set)),
+    Test   = rep("Average", length(train_set)),
+    stringsAsFactors = FALSE
+  )
+  
+  # Append the average results to the combined data frame
+  pred_ac_res <- rbind(pred_ac_res, avg_df)
+}
+
+# Replace AUCROC values of 1 with NA
+pred_ac_res$AUCROC[pred_ac_res$AUCROC == 1] <- NA
+
+# Initialize a new column 'Fill' to store comparison labels
+pred_ac_res$Fill <- "same"
+
+# For each method, compare AUCROC to a baseline of 0.5 and assign Fill labels
+for (m in methods) {
+  # Identify rows corresponding to the current method
+  idx <- which(pred_ac_res$Type == m)
+  
+  # Compute the difference from 0.5
+  diff <- 0.5 - pred_ac_res$AUCROC[idx]
+  
+  # Optionally, print the proportion where the difference is positive
+  print(mean(diff[!is.na(diff)] > 0))
+  
+  # Assign labels based on the sign of the difference
+  pred_ac_res$Fill[idx][diff > 0]  <- "high"
+  pred_ac_res$Fill[idx][diff < 0]  <- "low"
+  pred_ac_res$Fill[idx][diff == 0] <- "same"
+}
+```
+
+```{r}
+write.csv(pred_ac_res,"../result/realdata_nc.csv")
+```
+

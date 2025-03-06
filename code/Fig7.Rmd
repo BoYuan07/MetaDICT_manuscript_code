@@ -1,0 +1,705 @@
+
+```{r}
+library(stringr)
+library(ape)
+library(mclust)
+library(ConQuR)
+library(MMUPHin)
+library(doParallel)
+library(PLSDAbatch)
+library(dplyr)
+library(MicrobiomeStat)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(microeco)
+library(randomForest)
+library(caret)
+library(pROC)
+
+source("./function.R")
+```
+
+
+```{r}
+# Set the parent directory containing the CSV files (update this path)
+parent_dir <- "../data/Rawdata_PD1/"
+
+# Get a list of all CSV files in the directory and subdirectories
+txt_files <- list.files(path = parent_dir, pattern = "otu_table.txt", full.names = TRUE, recursive = TRUE)
+csv_files <- list.files(path = parent_dir, pattern = "metatable.csv", full.names = TRUE, recursive = TRUE)
+
+
+# Function to read CSV files
+read_file <- function(file, type = "txt") {
+  if(type == "txt"){
+    tryCatch({
+    df <- read.table(file,row.names = 1, sep = "\t")
+    return(df)
+  }, error = function(e) {
+    message(paste("Error reading file:", file, "-", e$message))
+    return(NULL)
+  })
+  }else if(type == "csv"){
+    tryCatch({
+    df <- read.csv(file)
+    return(df)
+  }, error = function(e) {
+    message(paste("Error reading file:", file, "-", e$message))
+    return(NULL)
+  })
+  }
+}
+```
+
+```{r}
+list.folder <- basename(list.dirs(path = parent_dir, full.names = TRUE, recursive = FALSE))
+```
+
+```{r}
+# Read all files into a list
+count_data_list <- lapply(txt_files, function(x)read_file(x,"txt"))
+meta_data_list <- lapply(csv_files,function(x)read_file(x,"csv"))
+```
+
+```{r}
+# generate taxonomy table list & count list
+species_table_list <- list()
+taxonomy_list <- list()
+for(i in 1:length(count_data_list)){
+  file <- count_data_list[[i]]
+  colnames(file) <- file[1,]
+  rownames(file)
+  file <- file[-1,]
+  taxonomy <- as.data.frame(t(sapply(file[,ncol(file)], function(i)str_split(i,  ";")[[1]])))
+  colnames(taxonomy) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
+  taxonomy$Species <- rownames(file)
+  taxonomy <- taxonomy %>%
+  mutate(Species = gsub(".*:(.*)$", "\\1", Species))
+  taxonomy$OTU <- rownames(file)
+  
+  possible_species <- str_split(taxonomy$OTU, pattern = ":")
+  possible_species_num <- sapply(possible_species,length)
+  
+  prefix_detect <- str_detect(sapply(possible_species,function(x)x[1]),"otu")
+  
+  taxonomy$Species[which(possible_species_num>1 & !(prefix_detect & possible_species_num==2))] <- "s_unassigned"
+  
+  file <- file[,1:(ncol(file)-1)]
+  count <- lapply(file, function(x) if(is.character(x)) as.numeric(x) else x)
+  count <- as.data.frame(count)
+  rownames(count) <- rownames(file)
+  species_table_list[[i]] <- count
+  taxonomy_list[[i]] <- taxonomy
+}
+```
+
+
+```{r}
+# filtering samples based on meta table
+filtered_count <- list()
+filtered_meta <- list()
+for(i in 1:1:length(species_table_list)){
+  print(paste("Dataset",i))
+  meta <- meta_data_list[[i]]
+  O <- species_table_list[[i]]
+  if("SampleID" %in% colnames(meta)){
+    if(sum(meta$SampleID %in% colnames(O))){
+      print("All samples are found. Filtering starts...")
+      selected_ind <- 1:nrow(meta)
+    }else{
+      print("Only keep existing samples.")
+      selected_ind <- which(meta$SampleID%in%colnames(O))
+    }
+    selected_sample <- meta$SampleID[selected_ind]
+    O <- O[,selected_sample]
+    filtered_count[[i]] <- O
+    filtered_meta[[i]] <- data.frame("Response" = meta$Response[selected_ind], 
+                                  "Dataset" = rep(list.folder[i], length(selected_ind)))
+  }else{
+    print(paste("Dataset",i,"sampleID does not exist."))
+  }
+}
+```
+
+```{r}
+# merge taxa across datasets
+otu_merge <- unique(do.call(c,lapply(filtered_count,function(X)rownames(X))))
+
+sample_num <- c()
+O_list <- list()
+for(i in 1:length(filtered_count)){
+  O <- filtered_count[[i]]
+  O1 <- O[otu_merge,]
+  O1[is.na(O1)] <- 0
+  rownames(O1) <- otu_merge
+  O_list[[i]] <- O1
+  sample_num <- c(sample_num, ncol(O1))
+}
+
+```
+
+```{r}
+meta.list <- filtered_meta
+meta <- do.call(rbind,meta.list)
+table(meta$Response)
+```
+
+```{r}
+taxonomy <- do.call(rbind,taxonomy_list)
+taxonomy <- unique(taxonomy)
+rownames(taxonomy) <- taxonomy$OTU
+taxonomy <- taxonomy[otu_merge,]
+```
+
+```{r}
+write.csv(taxonomy,"taxonomy.csv")
+```
+
+```{r}
+# Filter out taxa that appear less than 10% samples in concatenated data
+count <- do.call(cbind,O_list)
+zero_taxa <- which(rowSums(count!=0)<0.1*ncol(count))
+
+count <- count[-zero_taxa,]
+taxonomy <- taxonomy[-zero_taxa,]
+
+for(i in 1:length(O_list)){
+  O_list[[i]] <- O_list[[i]][-zero_taxa,]
+}
+```
+
+## singular value for each dataset
+
+```{r}
+# Initialize an empty list to store results
+svd_results <- list()
+
+# Loop through each dataset in O.list
+for (i in seq_along(O_list)) {
+  svd_d <- svd(O_list[[i]])$d  # Get singular values
+  
+  # Create a temporary data frame for the current dataset
+  temp_df <- data.frame(
+    value = svd_d,
+    taxon = seq_along(svd_d),  # Correct indexing
+    dataset = list.folder[i]
+  )
+  
+  # Store in list
+  svd_results[[i]] <- temp_df
+}
+
+# Combine all results into a single data frame
+svd_value <- do.call(rbind, svd_results)
+```
+
+```{r}
+p1 <- ggplot(svd_results[[1]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    legend.text  = element_text(size = 10)
+  )
+p2 <- ggplot(svd_results[[2]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+     plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+p3 <- ggplot(svd_results[[3]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+     plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+p4 <- ggplot(svd_results[[4]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+
+p5 <- ggplot(svd_results[[5]], aes(x = taxon, y = value)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d(option = "plasma") +
+  facet_wrap(~dataset, ncol = 5)+
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title   = element_blank(),
+    axis.title   = element_blank(),
+    axis.text    = element_text(size = 10)
+  )
+
+p_arranged = ggarrange(p1,p2,p3,p4,p5,nrow=1)
+final_plot <- annotate_figure(p_arranged, 
+                top = text_grob("Singular Value of PD1 Datasets", 
+                                face = "bold", size = 14))
+ggsave("../fig/pd1_singular_val.jpeg", dpi = 300, units="in", width=20, height=4)
+```
+
+## Data integration
+
+```{r}
+# generate adjacency matrix
+adj_mat <- matrix(0,nrow=nrow(count),ncol = nrow(count))
+wrong_g <- c()
+for(i in 1:(nrow(count)-1)){
+  name1 <- rownames(count)[i]
+  for(j in (i+1):nrow(count)){
+    name2 <- rownames(count)[j]
+    if(all(taxonomy[name1,1:6] == taxonomy[name2,1:6])){ 
+        #if two taxa are from same family
+        adj_mat[i,j] <- 1
+        next
+      }else if(all(taxonomy[name1,1:5] == taxonomy[name2,1:5])){ 
+        #if two taxa are from same family
+        adj_mat[i,j] <- 1/2
+        next
+      }else if(all(taxonomy[name1,1:4] == taxonomy[name2,1:4])){
+        #if two taxa are from same order
+        adj_mat[i,j] <- 1/4
+        next
+      }
+  }
+}
+# generate distance matrix
+adj_mat <- adj_mat+diag(nrow(count))+t(adj_mat)
+dist_mat <- 1-adj_mat
+```
+
+```{r}
+# generate input meta list = metadict
+meta.list.metadict <- lapply(1:length(meta.list),function(i)data.frame("Response" = meta.list[[i]][,1]))
+```
+
+```{r}
+running_time <- system.time({
+alpha <- 0.01
+beta <- 0.01
+gamma <- 1
+metadict.res <- metadict(O_list, alpha, beta, gamma, dist_mat, meta.list.metadict, max_iter = 20000, trace = 3)})
+```
+
+```{r}
+X <- metadict.res$X
+```
+
+```{r}
+write.csv(count,file = "../result/pd1/count_otu.csv")
+write.csv(meta,file = "../result/pd1/meta_otu.csv")
+```
+
+```{r, warning=F}
+# other methods
+## other methods
+res_ComBatSeq <- sva::ComBat_seq(as.matrix(count), meta$Dataset, group = meta$Response)
+
+rownames(meta) <- colnames(count)
+res_mmuphin <- adjust_batch(
+    feature_abd = count,
+    batch = "Dataset",
+    covariates = c("Response"),
+    data = meta
+  )$feature_abd_adj
+
+tax_tab <- t(count)
+batchid <- factor(meta$Dataset,levels = unique(meta$Dataset), labels = 1:length(unique(meta$Dataset)))
+
+res_ConQuR <- t(ConQuR(tax_tab, batchid, batch_ref = 1, covariates = as.factor(meta$Response)))
+
+O_ref <- t(count)/colSums(count)
+O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
+colnames(O_ref) <- rownames(count)
+rownames(O_ref) <- colnames(count)
+res_percentile <- t(percentile_norm(O_ref, meta$Dataset, meta$Response, "R"))
+
+O.clr <- microbiome::transform(count, "clr")
+res_plsda <- t(PLSDA_batch(t(O.clr), Y.trt = meta$Response, Y.bat = meta$Dataset, balance = F)$X.nobatch)
+res_debiasm <- t(read.csv("../result/pd1/debiasm_res_otu.csv")[,-1])
+res_scanvi <- t(read.csv("../result/pd1/scvi_res_otu.csv")[,-1])
+```
+
+```{r}
+# reformat
+res_metadict <- data.frame(X)
+rownames(res_metadict) <- rownames(count)
+colnames(res_metadict) <- colnames(count)
+
+res_ComBatSeq <- data.frame(res_ComBatSeq)
+
+res_ConQuR <- data.frame(res_ConQuR)
+
+res_debiasm <- data.frame(res_debiasm)
+rownames(res_debiasm) <- rownames(count)
+colnames(res_debiasm) <- colnames(count)
+
+res_mmuphin <- data.frame(res_mmuphin)
+rownames(res_mmuphin) <- rownames(count)
+colnames(res_mmuphin) <- colnames(res_mmuphin)
+
+res_percentile <- data.frame(res_percentile)
+rownames(res_percentile) <- rownames(count)
+colnames(res_percentile) <- colnames(count)
+
+res_plsda <- data.frame(res_plsda)
+rownames(res_plsda) <- rownames(count)
+colnames(res_plsda) <- colnames(count)
+
+res_scanvi <- data.frame(res_scanvi)
+rownames(res_scanvi) <- paste0("Taxon",1:10)
+colnames(res_scanvi) <- colnames(count)
+
+count.list <- list(count, res_ComBatSeq, res_ConQuR, res_debiasm, res_metadict, res_mmuphin, res_percentile, res_plsda, res_scanvi)
+count.name <- c("Unprocessed", "ComBatSeq", "ConQuR", "DEBIAS-M", "MetaDICT", "MMUPHin", "Percentile", "PLSDA", "scANVI")
+```
+
+```{r}
+# save results for neural network classifier
+write.csv(res_ComBatSeq,"../result/pd1/combatseq.csv")
+write.csv(res_ConQuR,"../result/pd1/conqur.csv")
+write.csv(res_debiasm,"../result/pd1/debiasm.csv")
+write.csv(res_mmuphin,"../result/pd1/mmuphin.csv")
+write.csv(res_percentile,"../result/pd1/percentile.csv")
+write.csv(res_plsda,"../result/pd1/plsda.csv")
+write.csv(res_scanvi,"../result/pd1/scanvi.csv")
+write.csv(res_metadict,file = "../result/pd1/metadict.csv")
+```
+
+## barplot: responders versus non-responders
+
+```{r}
+ggplot(meta, aes(x = Dataset, fill = Response)) +
+  geom_bar(position = position_dodge(width = 0.9), color = "white") +
+  geom_text(stat = "count", 
+            aes(label = ..count..), 
+            position = position_dodge(width = 0.9), 
+            vjust = 1.5, 
+            color = "white", 
+            size = 4) +
+  scale_fill_brewer(palette = "Set1") +
+  labs(x = "Dataset", 
+       y = "Number of Samples", 
+       fill = "Response",
+       title = "Sample Distribution by Dataset and Response") +
+  theme_minimal(base_family = "Georgia") +
+  theme(
+    legend.position = "right",
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold"),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    panel.grid.major.x = element_blank()
+  )
+ggsave("../fig/barplot_group_pd1.jpeg",units="in",width=8, height=6)
+```
+
+
+## PCoA plots
+
+```{r}
+p1_0 <- pcoa.plot.discrete(count,meta$Dataset,"Unprocessed", pointsize = 1)
+p1_1 <- pcoa.plot.discrete(res_metadict,meta$Dataset,"MetaDICT",pointsize = 1)
+p1_2 <- pcoa.plot.discrete(res_ComBatSeq,meta$Dataset,"CombatSeq",pointsize = 1)
+p1_3 <- pcoa.plot.discrete(res_mmuphin,meta$Dataset,"MMUPHin",pointsize = 1)
+p1_4 <- pcoa.plot.discrete(res_ConQuR,meta$Dataset,"ConQuR",pointsize = 1)
+p1_5 <- pcoa.plot.discrete(res_percentile,meta$Dataset,"Percentile-Norm",pointsize = 1)
+p1_6 <- pcoa.plot.discrete(res_debiasm,meta$Dataset,"DEBIAS-M",pointsize = 1)
+p1_7 <- pcoa.plot.discrete(res_scanvi,meta$Dataset,"scANVI",pointsize = 1,distance = "euclidean")
+p1_8 <- pcoa.plot.discrete(res_plsda,meta$Dataset,"PLSDA-batch",pointsize = 1,distance = "euclidean")
+```
+
+```{r}
+p2_0 <- pcoa.plot.discrete(count,meta$Response,"Unprocessed",pointsize = 1, colorset = "Dark2")
+p2_1 <- pcoa.plot.discrete(res_metadict,meta$Response,"MetaDICT",pointsize = 1, colorset = "Dark2")
+p2_2 <- pcoa.plot.discrete(res_ComBatSeq,meta$Response,"CombatSeq",pointsize = 1, colorset = "Dark2")
+p2_3 <- pcoa.plot.discrete(res_mmuphin,meta$Response,"MMUPHin",pointsize = 1, colorset = "Dark2")
+p2_4 <- pcoa.plot.discrete(res_ConQuR,meta$Response,"ConQuR",pointsize = 1, colorset = "Dark2")
+p2_5 <- pcoa.plot.discrete(res_percentile,meta$Response,"Percentile-Norm",pointsize = 1, colorset = "Dark2")
+p2_6 <- pcoa.plot.discrete(res_debiasm, meta$Response,"DEBIAS-M",pointsize = 1, colorset = "Dark2")
+p2_7 <- pcoa.plot.discrete(res_scanvi, meta$Response,"scANVI",pointsize = 1, colorset = "Dark2",distance = "euclidean")
+p2_8 <- pcoa.plot.discrete(res_plsda, meta$Response,"PLSDA-batch",pointsize = 1, colorset = "Dark2",distance = "euclidean")
+```
+
+```{r}
+ggarrange(p1_0,p1_1,p1_2,p1_3,p1_4,p1_5,p1_6,p1_7,p1_8, nrow = 1,common.legend = T, legend="bottom")
+ggsave("../fig/rd_pcoa_batch_pd1.jpeg",dpi=300, units="in", width=20, height=3)
+```
+
+```{r}
+ggarrange(p2_0,p2_1,p2_2,p2_3,p2_4,p2_5,p2_6,p2_7,p2_8,nrow = 1,common.legend = T,legend="bottom")
+ggsave("../fig/rd_pcoa_group_pd1.jpeg",dpi=300, units="in", width=20, height=3)
+```
+
+# Differential abundance test
+
+## OTU level
+
+```{r}
+# Unprocessed data
+out.raw <- linda(count,meta,formula = "~Response",
+           p.adj.method = "BH", alpha = 0.1)
+
+
+diff_res.raw <- as.data.frame(cbind(out.raw$output$ResponseR$reject,taxonomy))
+diff_res.raw$Taxon <- rownames(count)
+```
+
+```{r}
+# MetaDICT-processed data
+linda_input = res_metadict*1000
+out.metadict <- linda(res_metadict,meta,formula = "~Response",
+           p.adj.method = "BH", alpha = 0.1)
+
+diff_res.metadict <- as.data.frame(cbind(out.metadict$output$ResponseR$reject,taxonomy))
+diff_res.metadict$Taxon <- rownames(count)
+```
+
+```{r}
+q.anc.metadict <- out.metadict$output$ResponseR$padj
+diff.metadict <- out.metadict$output$ResponseR$reject
+p.anc.metadict <- out.metadict$output$ResponseR$pvalue
+
+logfold.metadict <- out.metadict$output$ResponseR$log2FoldChange
+Significance <- rep("Not Differentially Abundant",length(diff.metadict))
+Significance[diff.metadict == T & logfold.metadict>0] <- rep("More Abundant in Responder")
+Significance[diff.metadict == T & logfold.metadict<0] <- rep("More Abundant in Non-responder")
+
+diff_res.metadict <- as.data.frame(cbind(diff.metadict,Significance,taxonomy))
+diff_res.metadict$Taxon <- rownames(count)
+diff_res.metadict$logfold <- logfold.metadict
+diff_res.metadict$negLog10P <- -log10(q.anc.metadict)
+
+logFC_threshold <- 0
+negLog10P_threshold <- -log10(0.1)
+```
+
+```{r}
+diff_res.metadict$Taxon[str_detect(diff_res.metadict$Genus,"g__unassigned")] <- "Unassigned"
+diff_res.metadict$Taxon[str_detect(diff_res.metadict$Taxon,"otu828")] <- "otu828:Unassigned OTU of Clostridium"
+```
+
+```{r}
+ggplot(diff_res.metadict, aes(x = logfold, y = negLog10P, color = Significance)) +
+  geom_point(alpha = 0.3, size = 5) +
+  scale_color_manual(values = c("More Abundant in Responder" = "#E41A1C", "More Abundant in Non-responder" = "#377EBB", "NS" = "grey")) +
+  geom_vline(xintercept = c(-logFC_threshold, logFC_threshold), linetype = "dashed", color = "black") +
+  geom_hline(yintercept = negLog10P_threshold, linetype = "dashed", color = "black") +
+  labs(
+    title = "Volcano Plot",
+    x = "Log2 Fold Change",
+    y = "-Log10 adjusted P-value"
+  ) +
+  ylim(0,1.3)+
+  theme_bw()+
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 16),
+    legend.title = element_text(face = "bold", size = 13),
+    legend.text = element_text(size = 13),
+    axis.text = element_text(size = 13))+
+  geom_text_repel(
+    data = subset(diff_res.metadict, Significance %in% c("More Abundant in Responder", "More Abundant in Non-responder")),
+    aes(label = Taxon),
+    size = 3.5,
+    box.padding   = 0.5,              # Increase space around the label box
+    point.padding = 0.5,              # Space between the point and the label
+    segment.size  = 0.5,
+    force = 5,
+    segment.linetype = "dashed",                # Make connector line dashed
+    nudge_x = 0.1,                            # Nudge label closer horizontally
+    nudge_y = 0.15,  
+    max.overlaps = 50,
+    fontface = "bold",
+    show.legend = FALSE
+  )
+ggsave("../fig/volcano_plot.jpeg", dpi=300,units="in",width=13, height=8)
+```
+
+```{r}
+write.csv(diff_res.metadict,"diff_metadict.csv")
+```
+
+## prediction
+
+```{r}
+set.seed(2024)
+seeds <- vector(mode = "list", length = 6)
+for(i in 1:5) seeds[[i]]<- sample.int(n=1000, 3)
+seeds[[6]] <- sample.int(n=1000, 1)
+```
+
+```{r}
+RF_pred <- function(train,test,trainy,testy){
+  control <- trainControl(method = "cv",          # Cross-validation
+                          number = 5,             # Number of folds
+                          summaryFunction = twoClassSummary,  # For ROC
+                          classProbs = TRUE,
+                          seeds = seeds)       # Enable probabilities for ROC
+  dataset <- data.frame(trainy,t(train))
+  rf <- train(trainy~., data=dataset, 
+                  method="rf", 
+                  metric='ROC',
+                  trControl=control,
+                  ntree = 500)
+  rownames(test) <- colnames(dataset)[-1]
+  test_pred <- predict(rf, newdata = t(test))
+  actual <- testy
+  roc_object <- roc(actual,as.numeric(test_pred))
+  return(auc(roc_object))
+}
+```
+
+```{r}
+predict_task <- function(data,batchid,group,method){
+  include_study <- unique(batchid)
+  nbatch <- length(include_study)
+  data.list <- list()
+  y.list <- list()
+  train <- c()
+  type <- c()
+  test <- c()
+  pred_res <- c()
+
+  for(i in 1:nbatch){
+    data.list[[i]] <- data[,which(batchid==include_study[i])]
+    y.list[[i]] <- group[which(batchid==include_study[i])]
+  }
+  
+  for(j in 1:nbatch){
+    pred_res <- c(pred_res,RF_pred(data[,which(batchid!=include_study[j])],data.list[[j]],as.factor(group[which(batchid!=include_study[j])]), as.factor(y.list[[j]])))
+    train <- c(train,"LOSO")
+    test <- c(test,include_study[j])
+    type <- c(type, method)
+  }
+  
+  pred_ac_res = data.frame("AUCROC" = pred_res, "Train" = train, "Test" = test, "Type" = type)
+  return(pred_ac_res)
+}
+```
+
+```{r}
+set.seed(2025)
+pred_unprocessed <- predict_task(count, meta$Dataset, meta$Response, "Unprocessed")
+pred_metadict <- predict_task(res_metadict, meta$Dataset, meta$Response, "MetaDICT")
+pred_combatseq <- predict_task(res_ComBatSeq, meta$Dataset, meta$Response, "ComBatSeq")
+pred_mmuphin <- predict_task(res_mmuphin, meta$Dataset, meta$Response, "MMUPHin")
+pred_percentile <- predict_task(res_percentile, meta$Dataset, meta$Response, "Percentile-Norm")
+pred_debiasm <- predict_task(res_debiasm, meta$Dataset, meta$Response, "DEBIAS-M")
+pred_plsda <- predict_task(res_plsda, meta$Dataset, meta$Response, "PLSDA-batch")
+pred_percentile <- predict_task(res_percentile, meta$Dataset, meta$Response, "Percentile-Norm")
+```
+
+```{r}
+pred_ac_res = rbind(pred_unprocessed,pred_metadict,pred_combatseq,pred_mmuphin,pred_percentile,pred_debiasm,pred_plsda)
+```
+
+```{r}
+method = unique(pred_ac_res$Type)
+train_set = unique(pred_ac_res$Train)
+for(i in 1:length(method)){
+   avg_value = sapply(train_set,function(j)mean(pred_ac_res$AUCROC[pred_ac_res$Train==j&pred_ac_res$Test!=j&pred_ac_res$Type==method[i]]))
+  pred_ac_res = rbind(pred_ac_res,data.frame("AUCROC" = avg_value,"Train" = train_set,"Type" = rep(method[i],length(train_set)),"Test"=rep("Average",length(train_set))))
+}
+```
+
+```{r}
+ggplot(data = pred_ac_res, aes(x = Test, y = AUCROC, fill = Type))+
+  geom_bar(stat="identity",
+         position=position_dodge(),
+         alpha = 0.8)+
+  ylim(0,1)+
+  geom_abline(slope = 0, intercept = 0.5, linetype = "dashed", color = "black") +  # Diagonal line (random classifier)
+  scale_fill_brewer(palette="Set3")+
+  ylab("ROC-AUC")+
+  ggtitle("Random Forest Leave-one-study-out")+
+  xlab("Study")+
+  theme(legend.title = element_blank())+
+  theme_bw()
+ggsave("../fig/pd1_random_forest.jpeg")
+```
+
+## negative control
+
+```{r}
+set.seed(2024)
+meta.list.nc <- list()
+for(i in 1:length(O_list)){
+  meta.list.nc[[i]] <- data.frame("Y" = paste("Group",rbinom(ncol(O_list[[i]]),1,0.5)))
+}
+meta.nc = do.call("rbind",meta.list.nc)
+```
+
+```{r}
+metadict.res.nc <- metadict(
+  O_list, alpha, beta, gamma, dist_mat, meta.list.nc, trace = 3
+)
+
+res_ComBatSeq.nc <- sva::ComBat_seq(
+  as.matrix(count), 
+  meta$Dataset, 
+  covar_mod = as.data.frame(meta.nc)
+)
+
+rownames(meta.nc) = colnames(count)
+meta.nc$Dataset <- meta$Dataset
+res_mmuphin.nc <- adjust_batch(
+    feature_abd = count,
+    batch = "Dataset",
+    covariates = c("Y"),
+    data = meta.nc
+  )$feature_abd_adj
+
+tax_tab <- t(count)
+batchid <- factor(meta$Dataset,levels = unique(meta$Dataset), labels = 1:length(unique(meta$Dataset)))
+res_ConQuR.nc <- t(ConQuR(tax_tab, batchid, batch_ref = 1, covariates = as.factor(meta.nc$Y)))
+
+res_percentile.nc <- t(percentile_norm(O_ref, meta$Dataset, meta.nc$Y, "Group 1"))
+
+# PLSDA batch correction after CLR transformation
+O.clr <- microbiome::transform(count, "clr")
+res_plsda.nc <- t(PLSDA_batch(t(O.clr), Y.trt = meta.nc$Y, Y.bat = meta$Dataset)$X.nobatch)
+```
+
+```{r}
+write.csv(meta.nc,file = "../result/pd1/meta_nc.csv")
+```
+
+```{r}
+# Load external results for DEBIAS-M and scANVI
+res_debiasm.nc <- t(read.csv("../result/pd1/debiasm_res_nc.csv")[, -1])
+res_scanvi.nc  <- t(read.csv("../result/pd1/scvi_res_nc.csv")[, -1])
+```
+
+```{r}
+# Format MetaDICT results as a data frame with proper row/column names
+res_metadict.nc <- data.frame(metadict.res.nc$X)
+rownames(res_metadict.nc) <- rownames(count)
+colnames(res_metadict.nc) <- colnames(count)
+```
+
+```{r}
+# save results for neural network classifier
+write.csv(res_ComBatSeq.nc,"../result/pd1/combatseq_nc.csv")
+write.csv(res_ConQuR.nc,"../result/pd1/conqur_nc.csv")
+write.csv(res_debiasm.nc,"../result/pd1/debiasm_nc.csv")
+write.csv(res_mmuphin.nc,"../result/pd1/mmuphin_nc.csv")
+write.csv(res_percentile.nc,"../result/pd1/percentile_nc.csv")
+write.csv(res_plsda.nc,"../result/pd1/plsda_nc.csv")
+write.csv(res_scanvi.nc,"../result/pd1/scanvi_nc.csv")
+write.csv(res_metadict.nc,file = "../result/pd1/metadict_nc.csv")
+```

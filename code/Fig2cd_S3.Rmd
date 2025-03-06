@@ -1,0 +1,1021 @@
+```{r}
+library(ecodist)
+library(ggplot2)
+library(vegan)
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(bayesm)
+library(ggpubr)
+library(PLSDAbatch)
+source("./function.R")
+```
+
+```{r}
+# load order level data
+count = read.csv("../data/count_order.csv")
+count = count[,-1]
+
+dist = read.csv("../data/dist_order.csv")
+dist = as.matrix(dist[,-1])
+```
+
+```{r}
+load("../result/Fig2cd.RData")
+```
+
+
+# pcoa: Fig2 (c)-(d)
+
+```{r}
+init_dataset_discrete <- function(m,n,count,dist,k,neighbor = 5, sigma = 1, ez = 10){
+  
+  #------------------------------------------------------------------------------
+  # 1. Initialize Variables
+  #------------------------------------------------------------------------------
+
+  d <- nrow(count) # Number of taxa
+  O_list <- list() # Observed abundance list
+  X_list <- list() # absolute abundance
+  w_list <- matrix(0,m,d) # measurement efficiency
+  
+  meta.list <- list() # Meta table with covariate Y
+  meta.list1 = list() # Meta table without covariate Y
+  
+  # Select 40 random taxa to be increased in abundance for Y = 1 group
+  d1 <- sample(1:d,40)
+  
+  #------------------------------------------------------------------------------
+  # 2. Construct Taxa Adjacency and Laplacian Matrix
+  #------------------------------------------------------------------------------
+  
+  A <- matrix(0,d,d)
+  for(i in 1:d){
+    idx <- order(dist[i,],decreasing = F)[2:(neighbor+1)]
+    A[i,idx] <- A[idx,i] <- exp(-dist[i,idx]/sigma)
+  }
+  
+  # Compute Laplacian matrix L = D1 - A, where D1 is the degree matrix
+  D1 <- diag(rowSums(A))
+  L <- D1-A 
+  
+  # Extract last k eigenvectors of L for constructing measurement efficiency
+  svd_res <- svd(L)
+  U <- svd_res$u[ , (ncol(svd_res$u) - k + 1):ncol(svd_res$u)]
+  
+  #------------------------------------------------------------------------------
+  # 3. Generate Datasets
+  #------------------------------------------------------------------------------
+  
+  for(i in 1:m){
+    # Sample basis for simulated dataset i
+    idx1 <- sample(ncol(count),n)
+    X0 <- as.matrix(count[,idx1])
+    
+    # Simulate absolute abundance
+    X <- sapply(1:n,function(j)rdirichlet(X0[,j]+0.1))
+    
+    # Y: conditions
+    Y <- sample(1:2,size=n,replace=TRUE,prob=c(1/2,1/2))
+    
+    
+    # Add differences between two groups
+    X[d1,which(Y==1)] <- (X[d1,which(Y==1)])*ez
+    
+    # Simulate sample-specific bias
+    X_lib <- X%*%diag(sample(10000:15000,n,replace = T))
+
+    #------------------------------------------------------------------------------
+    # 4. Generate Measurement Efficiency 'w'
+    #------------------------------------------------------------------------------
+
+    weight <- 1 - 2 * runif(k)        # Random weights in [-1, 1]
+    w_raw  <- U %*% as.matrix(weight) # Project onto eigenvector space
+    w_vec  <- w_raw[ , 1]             # Extract as a single vector
+    
+    # Normalize 'w' to range [0.05, 1]
+    w_vec <- (w_vec - min(w_vec) + 0.05) 
+    w_vec <- w_vec / max(w_vec)
+    
+    # Y2: uninformative label
+    Y2 <- rbinom(n,1,1/2)
+    
+    #------------------------------------------------------------------------------
+    # 5. Apply Measurement Efficiency and Store Data
+    #------------------------------------------------------------------------------
+
+    O_list[[i]]  <- floor(diag(w_vec) %*% X_lib)  # Apply measurement efficiency
+    w_list[i, ]  <- w_vec                         # Store efficiency vector
+    X_list[[i]]  <- X                             # Store true abundance
+    
+    # Metadata storage
+    meta.list[[i]]  <- data.frame(Y = paste("Group", Y), Y2 = paste("Group", Y2))
+    meta.list1[[i]] <- data.frame(Y2 = paste("Group", Y2))
+  }
+  return(list(O_list, w_list, X_list, meta.list, meta.list1))
+}
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(3)
+
+# Define dataset parameters
+m <- 2      # Number of datasets
+n <- 200    # Number of samples per dataset
+
+# Generate simulated dataset
+data <- init_dataset_discrete(m, n, count, dist, k = 10, ez = 5)
+
+# Extract components from the generated data
+O_list      <- data[[1]]  # Observed abundance (with measurement bias)
+w_list_t    <- data[[2]]  # Measurement efficiency values
+X_list      <- data[[3]]  # True abundance (without measurement bias)
+meta.list   <- data[[4]]  # Full metadata (includes Y and Y2)
+meta.list.sub <- data[[5]] # Metadata subset (without Y)
+
+# Combine metadata and observed abundance into single structures
+meta <- do.call(rbind, meta.list)  # Merge metadata from all datasets
+O    <- do.call(cbind, O_list)     # Merge observed abundance matrices
+
+# Assign batch labels to metadata
+meta$batch <- factor(rep(paste0("Batch ", seq_len(m)), each = n))
+
+# Convert categorical variables to factors
+meta$Y  <- factor(meta$Y)
+meta$Y2 <- factor(meta$Y2)
+
+# Create a version of meta without the primary group label (Y)
+meta_sub <- meta[ , -1]
+
+# Define dataset and sample grouping information
+dataset_info <- meta$batch
+sample_info  <- meta$Y
+
+#write.csv(O,"../data/Simulation_data/other_sim/Fig2cd_count.csv")
+#write.csv(meta,"../data/Simulation_data/other_sim/Fig2cd_meta.csv")
+
+```
+
+
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (1) Setup & labeling
+#------------------------------------------------------------------------------
+rownames(O) <- paste0("Taxon", seq_len(nrow(O)))
+colnames(O) <- paste0("Sample", seq_len(ncol(O)))
+
+#------------------------------------------------------------------------------
+# (2) PCoA for unprocessed data
+#------------------------------------------------------------------------------
+p1.1 <- pcoa.plot.discrete(
+  O,
+  dataset_info,
+  "Unprocessed",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p1.2 <- pcoa.plot.discrete(
+  O,
+  sample_info,
+  "Unprocessed",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (3) PCoA for truth
+#------------------------------------------------------------------------------
+X <- do.call(cbind, X_list)
+p2.1 <- pcoa.plot.discrete(
+  X,
+  dataset_info,
+  "Truth",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p2.2 <- pcoa.plot.discrete(
+  X,
+  sample_info,
+  "Truth",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (4) MetaDICT analysis
+#------------------------------------------------------------------------------
+alpha <- 0.01
+beta  <- 0.1
+gamma <- 1                          
+
+metadict_res_1 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list.sub)  # without Y
+metadict_res_2 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list)      # with Y
+```
+
+
+```{r}
+p3.1 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p3.2 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  sample_info,
+  "MetaDICT",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p3.3 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p3.4 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  sample_info,
+  "MetaDICT",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (5) Percentile normalization
+#------------------------------------------------------------------------------
+O_ref <- t(O) / colSums(O)
+O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 1e-6)
+
+colnames(O_ref) <- paste0("Taxon",  seq_len(ncol(O_ref)))
+rownames(O_ref) <- paste0("Sample", seq_len(nrow(O_ref)))
+
+res_percentile_1 <- percentile_norm(O_ref, dataset_info, meta$Y2, "Group 1")
+res_percentile_2 <- percentile_norm(O_ref, dataset_info, meta$Y,  "Group 1")
+```
+
+
+```{r}
+p7.1 <- pcoa.plot.discrete(
+  t(res_percentile_1),
+  dataset_info,
+  "Percentile-Norm",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p7.2 <- pcoa.plot.discrete(
+  t(res_percentile_1),
+  sample_info,
+  "Percentile-Norm",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p7.3 <- pcoa.plot.discrete(
+  t(res_percentile_2),
+  dataset_info,
+  "Percentile-Norm",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p7.4 <- pcoa.plot.discrete(
+  t(res_percentile_2),
+  sample_info,
+  "Percentile-Norm",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (6) PLSDA-batch
+#------------------------------------------------------------------------------
+O.clr       <- microbiome::transform(O, "clr")
+res_plsda_1 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y2, Y.bat = dataset_info)$X.nobatch
+res_plsda_2 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y,  Y.bat = dataset_info)$X.nobatch
+```
+
+
+```{r}
+p8.1 <- pcoa.plot.discrete(
+  t(res_plsda_1),
+  dataset_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p8.2 <- pcoa.plot.discrete(
+  t(res_plsda_1),
+  sample_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p8.3 <- pcoa.plot.discrete(
+  t(res_plsda_2),
+  dataset_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p8.4 <- pcoa.plot.discrete(
+  t(res_plsda_2),
+  sample_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (7) scANVI results
+#------------------------------------------------------------------------------
+res_scvi_1 <- read.csv("../data/Simulation_data/other_sim/scvi_res_2cd_1.csv", row.names = 1)
+res_scvi_2 <- read.csv("../data/Simulation_data/other_sim/scvi_res_2cd_2.csv", row.names = 1)
+```
+
+
+```{r}
+p9.1 <- pcoa.plot.discrete(
+  t(res_scvi_1),
+  dataset_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p9.2 <- pcoa.plot.discrete(
+  t(res_scvi_1),
+  sample_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p9.3 <- pcoa.plot.discrete(
+  t(res_scvi_2),
+  dataset_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p9.4 <- pcoa.plot.discrete(
+  t(res_scvi_2),
+  sample_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (8) DEBIAS-M results
+#------------------------------------------------------------------------------
+res_debiasm_1 <- read.csv("../data/Simulation_data/other_sim/debiasm_res_2cd_1.csv", row.names = 1)
+res_debiasm_2 <- read.csv("../data/Simulation_data/other_sim/debiasm_res_2cd_2.csv", row.names = 1)
+```
+
+
+```{r}
+p10.1 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p10.2 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  sample_info,
+  "DEBIAS-M",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p10.3 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p10.4 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  sample_info,
+  "DEBIAS-M",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (9) ComBat-Seq
+#------------------------------------------------------------------------------
+res_ComBatSeq_1 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = as.data.frame(meta_sub[,-2])  # without Y
+)
+res_ComBatSeq_2 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = meta[,-3]                    # with Y
+)
+```
+
+
+```{r}
+p5.1 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p5.2 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  sample_info,
+  "ComBatSeq",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p5.3 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p5.4 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  sample_info,
+  "ComBatSeq",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (10) MMUPHin
+#------------------------------------------------------------------------------
+colnames(O)    <- paste0("Sample", seq_len(ncol(O)))
+rownames(meta) <- paste0("Sample", seq_len(ncol(O)))
+meta$batch     <- as.factor(meta$batch)
+
+res_mmuphin_1 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = "Y2",
+  data        = meta
+)$feature_abd_adj
+res_mmuphin_2 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = c("Y","Y2"),
+  data        = meta
+)$feature_abd_adj
+```
+
+
+```{r}
+p6.1 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p6.2 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  sample_info,
+  "MMUPHin",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p6.3 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p6.4 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  sample_info,
+  "MMUPHin",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (11) ConQuR
+#------------------------------------------------------------------------------
+batchid <- as.factor(do.call(c, lapply(seq_len(m), function(x) rep(x, n))))
+tax_tab <- t(O)
+
+res_ConQuR_1 <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = as.data.frame(meta_sub[,-2]))
+meta$Y       <- as.factor(meta$Y)
+res_ConQuR_2 <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta[,-3])
+```
+
+
+```{r}
+p4.1 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p4.2 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  sample_info,
+  "ConQuR",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+p4.3 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p4.4 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  sample_info,
+  "ConQuR",
+  colorset  = "Dark2",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (12) Figure arrangement
+#------------------------------------------------------------------------------
+ggarrange(
+  p1.1, p2.1, p3.1, p4.1, p5.1,
+  p6.1, p7.1, p8.1, p9.1, p10.1,
+  common.legend = TRUE, ncol = 10, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sim1_nocov_batch.jpeg", dpi = 300, units = "in", width = 22, height = 3)
+
+ggarrange(
+  p1.2, p2.2, p3.2, p4.2, p5.2,
+  p6.2, p7.2, p8.2, p9.2, p10.2,
+  common.legend = TRUE, ncol = 10, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sim1_nocov_sample.jpeg", dpi = 300, units = "in", width = 22, height = 3)
+
+ggarrange(
+  p1.1, p2.1, p3.3, p4.3, p5.3,
+  p6.3, p7.3, p8.3, p9.3, p10.3,
+  common.legend = TRUE, ncol = 10, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sim1_cov_batch.jpeg", dpi = 300, units = "in", width = 22, height = 3)
+
+ggarrange(
+  p1.2, p2.2, p3.4, p4.4, p5.4,
+  p6.4, p7.4, p8.4, p9.4, p10.4,
+  common.legend = TRUE, ncol = 10, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sim1_cov_sample.jpeg", dpi = 300, units = "in", width = 22, height = 3)
+```
+```{r}
+save.image(file = "../result/Fig2cd.RData")
+```
+
+
+# Fig S3
+
+```{r}
+init_dataset_cont <- function(m,n,count,dist,k,neighbor = 5, sigma = 1, ez = 10){
+  
+  #------------------------------------------------------------------------------
+  # 1. Initialize Variables
+  #------------------------------------------------------------------------------
+
+  d <- nrow(count) # Number of taxa
+  O_list <- list() # Observed abundance list
+  X_list <- list() # absolute abundance
+  w_list <- matrix(0,m,d) # measurement efficiency
+  
+  meta.list <- list() # Meta table with covariate Y
+  meta.list1 = list() # Meta table without covariate Y
+  
+  # Select 15 random taxa to be artificially increased in abundance for Y = 1 group
+  d1 <- sample(1:d,15)
+  
+  #------------------------------------------------------------------------------
+  # 2. Construct Taxa Adjacency and Laplacian Matrix
+  #------------------------------------------------------------------------------
+  
+  A <- matrix(0,d,d)
+  for(i in 1:d){
+    idx <- order(dist[i,],decreasing = F)[2:(neighbor+1)]
+    A[i,idx] <- A[idx,i] <- exp(-dist[i,idx]/sigma)
+  }
+  
+  # Compute Laplacian matrix L = D1 - A, where D1 is the degree matrix
+  D1 <- diag(rowSums(A))
+  L <- D1-A 
+  
+  # Extract last k eigenvectors of L for constructing measurement efficiency
+  svd_res <- svd(L)
+  U <- svd_res$u[ , (ncol(svd_res$u) - k + 1):ncol(svd_res$u)]
+  
+  #------------------------------------------------------------------------------
+  # 3. Generate Datasets
+  #------------------------------------------------------------------------------
+  
+  for(i in 1:m){
+    # Y: continuous covariate
+    Y <- runif(n,1,10)
+    
+    # Sample basis for simulated dataset i
+    idx1 <- sample(ncol(count),n)
+    X0 <- as.matrix(count[,idx1])
+    
+    # Simulate absolute abundance
+    X <- sapply(1:n,function(j)rdirichlet(X0[,j]+0.1))
+    
+    
+    # Add differences 
+    X[d1,] <- t(apply(X[d1,],1,function(x)x*Y))
+    
+    # Simulate sample-specific bias
+    X_lib <- X%*%diag(sample(10000:15000,n,replace = T))
+
+    #------------------------------------------------------------------------------
+    # 4. Generate Measurement Efficiency 'w'
+    #------------------------------------------------------------------------------
+
+    weight <- 1 - 2 * runif(k)        # Random weights in [-1, 1]
+    w_raw  <- U %*% as.matrix(weight) # Project onto eigenvector space
+    w_vec  <- w_raw[ , 1]             # Extract as a single vector
+    
+    # Normalize 'w' to range [0.05, 1]
+    w_vec <- (w_vec - min(w_vec) + 0.05) 
+    w_vec <- w_vec / max(w_vec)
+    
+    # Y2: uninformative label
+    Y2 <- rbinom(n,1,1/2)
+    
+    #------------------------------------------------------------------------------
+    # 5. Apply Measurement Efficiency and Store Data
+    #------------------------------------------------------------------------------
+
+    O_list[[i]]  <- floor(diag(w_vec) %*% X_lib)  # Apply measurement efficiency
+    w_list[i, ]  <- w_vec                         # Store efficiency vector
+    X_list[[i]]  <- X                             # Store true abundance
+    
+    # Metadata storage
+    meta.list[[i]]  <- data.frame(Y = Y, Y2 = paste("Group", Y2))
+    meta.list1[[i]] <- data.frame(Y2 = paste("Group", Y2))
+  }
+  return(list(O_list, w_list, X_list, meta.list, meta.list1))
+}
+```
+
+```{r}
+# Set seed for reproducibility
+set.seed(2)
+
+# Define dataset parameters
+m <- 2      # Number of datasets
+n <- 200    # Number of samples per dataset
+
+# Generate simulated dataset
+data <- init_dataset_cont(m, n, count, dist, k = 10, ez = 2)
+
+# Extract components from the generated data
+O_list      <- data[[1]]  # Observed abundance (with measurement bias)
+w_list_t    <- data[[2]]  # Measurement efficiency values
+X_list      <- data[[3]]  # True abundance (without measurement bias)
+meta.list   <- data[[4]]  # Full metadata (includes Y and Y2)
+meta.list.sub <- data[[5]] # Metadata subset (without Y)
+
+# Combine metadata and observed abundance into single structures
+meta <- do.call(rbind, meta.list)  # Merge metadata from all datasets
+O    <- do.call(cbind, O_list)     # Merge observed abundance matrices
+
+# Assign batch labels to metadata
+meta$batch <- factor(rep(paste0("Batch ", seq_len(m)), each = n))
+
+# Convert categorical variables to factors
+meta$Y2 <- factor(meta$Y2)
+
+# Create a version of meta without the primary group label (Y)
+meta_sub <- meta[ , -1]
+
+# Define dataset and sample grouping information
+dataset_info <- meta$batch
+sample_info  <- meta$Y
+#write.csv(O,"../data/Simulation_data/other_sim/FigS3_count.csv")
+#write.csv(meta,"../data/Simulation_data/other_sim/FigS3_meta.csv")
+```
+
+```{r}
+#------------------------------------------------------------------------------
+# (1) Setup & labeling
+#------------------------------------------------------------------------------
+rownames(O) <- paste0("Taxon", seq_len(nrow(O)))
+colnames(O) <- paste0("Sample", seq_len(ncol(O)))
+
+#------------------------------------------------------------------------------
+# (2) PCoA for unprocessed data
+#------------------------------------------------------------------------------
+p1.1 <- pcoa.plot.discrete(
+  O,
+  dataset_info,
+  "Unprocessed",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p1.2 <- pcoa.plot.continuous(
+  O,
+  sample_info,
+  "Unprocessed",
+  pointsize = 0.4
+)
+
+#------------------------------------------------------------------------------
+# (3) PCoA for truth
+#------------------------------------------------------------------------------
+X <- do.call(cbind, X_list)
+p2.1 <- pcoa.plot.discrete(
+  X,
+  dataset_info,
+  "Truth",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p2.2 <- pcoa.plot.continuous(
+  X,
+  sample_info,
+  "Truth",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (4) MetaDICT analysis
+#------------------------------------------------------------------------------
+alpha <- 0.01
+beta  <- 0.1
+gamma <- 1
+
+metadict_res_1 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list.sub)  # without Y
+metadict_res_2 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list)      # with Y
+
+p3.1 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p3.2 <- pcoa.plot.continuous(
+  metadict_res_1$X,
+  sample_info,
+  "MetaDICT",
+  pointsize = 0.4
+)
+p3.3 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p3.4 <- pcoa.plot.continuous(
+  metadict_res_2$X,
+  sample_info,
+  "MetaDICT",
+  pointsize = 0.4
+)
+```
+
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (5) DEBIAS-M results
+#------------------------------------------------------------------------------
+res_debiasm_1 <- read.csv("../data/Simulation_data/other_sim/debiasm_res_S3_1.csv", row.names = 1)
+res_debiasm_2 <- read.csv("../data/Simulation_data/other_sim/debiasm_res_S3_2.csv", row.names = 1)
+
+p10.1 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p10.2 <- pcoa.plot.continuous(
+  t(res_debiasm_1),
+  sample_info,
+  "DEBIAS-M",
+  pointsize = 0.4
+)
+p10.3 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p10.4 <- pcoa.plot.continuous(
+  t(res_debiasm_2),
+  sample_info,
+  "DEBIAS-M",
+  pointsize = 0.4
+)
+
+#------------------------------------------------------------------------------
+# (6) ComBat-Seq
+#------------------------------------------------------------------------------
+res_ComBatSeq_1 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = as.data.frame(meta_sub[,-2])  # without Y
+)
+res_ComBatSeq_2 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = meta[,-3]                    # with Y
+)
+
+p5.1 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p5.2 <- pcoa.plot.continuous(
+  res_ComBatSeq_1,
+  sample_info,
+  "ComBatSeq",
+  pointsize = 0.4
+)
+p5.3 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p5.4 <- pcoa.plot.continuous(
+  res_ComBatSeq_2,
+  sample_info,
+  "ComBatSeq",
+  pointsize = 0.4
+)
+
+#------------------------------------------------------------------------------
+# (7) MMUPHin
+#------------------------------------------------------------------------------
+colnames(O)    <- paste0("Sample", seq_len(ncol(O)))
+rownames(meta) <- paste0("Sample", seq_len(ncol(O)))
+meta$batch     <- as.factor(meta$batch)
+
+res_mmuphin_1 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = "Y2",
+  data        = meta
+)$feature_abd_adj
+res_mmuphin_2 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = c("Y","Y2"),
+  data        = meta
+)$feature_abd_adj
+
+p6.1 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p6.2 <- pcoa.plot.continuous(
+  res_mmuphin_1,
+  sample_info,
+  "MMUPHin",
+  pointsize = 0.4
+)
+p6.3 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p6.4 <- pcoa.plot.continuous(
+  res_mmuphin_2,
+  sample_info,
+  "MMUPHin",
+  pointsize = 0.4
+)
+
+#------------------------------------------------------------------------------
+# (8) ConQuR
+#------------------------------------------------------------------------------
+batchid <- as.factor(do.call(c, lapply(seq_len(m), function(x) rep(x, n))))
+tax_tab <- t(O)
+
+res_ConQuR_1 <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = as.data.frame(meta_sub[,-2]))
+res_ConQuR_2 <- ConQuR(tax_tab, batchid, batch_ref = 1, covariates = meta[,-3])
+
+p4.1 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p4.2 <- pcoa.plot.continuous(
+  t(res_ConQuR_1),
+  sample_info,
+  "ConQuR",
+  pointsize = 0.4
+)
+p4.3 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.4
+)
+p4.4 <- pcoa.plot.continuous(
+  t(res_ConQuR_2),
+  sample_info,
+  "ConQuR",
+  pointsize = 0.4
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (9) Figure arrangement
+#------------------------------------------------------------------------------
+
+ggarrange(p1.1,p2.1,p3.1,p4.1,p5.1,p6.1,p10.1,common.legend = TRUE,nrow=1,ncol = 7,legend="bottom")
+ggsave("../fig/pcoa_sim2_nocov_batch.jpeg", dpi=300, units="in", width=14, height=3)
+
+ggarrange(p1.2,p2.2,p3.2,p4.2,p5.2,p6.2,p10.2,common.legend = TRUE,nrow=1,ncol = 7,legend="bottom")
+ggsave("../fig/pcoa_sim2_nocov_sample.jpeg", dpi=300, units="in", width=14, height=3)
+
+# fig S3 (a)
+ggarrange(p1.1,p2.1,p3.3,p4.3,p5.3,p6.3,p10.3,common.legend = TRUE,nrow=1,ncol = 7,legend="bottom")
+ggsave("../fig/pcoa_sim2_cov_batch.jpeg", dpi=300, units="in", width=14, height=3)
+
+ggarrange(p1.2,p2.2,p3.4,p4.4,p5.4,p6.4,p10.4,common.legend = TRUE,nrow=1,ncol = 7,legend="bottom")
+ggsave("../fig/pcoa_sim2_cov_sample.jpeg", dpi=300, units="in", width=14, height=3)
+
+```
+
+

@@ -1,0 +1,378 @@
+
+# 5c
+
+```{r}
+library(ConQuR)
+library(doParallel)
+library(PLSDAbatch)
+library(MMUPHin)
+source("./function.R")
+```
+
+
+```{r}
+count <- read.csv("../data/count_order.csv")
+count <- count[,-1]
+
+dist <- read.csv("../data/dist_order.csv")
+dist <- as.matrix(dist[,-1])
+```
+
+
+```{r}
+init_dataset_da <- function(m,n,count,dist,lib_var=T,p = c(1/4,1/6)){
+  d <- nrow(count)
+  O_list <- list()
+  w_list <- list()
+  X_list <- list()
+  meta_list <- list()
+
+  A <- exp(-dist/0.1)
+  L <- diag(colSums(A))-A
+  svd_res <- svd(L)
+  U <- svd_res$u
+  U <- U[,(ncol(U)-100):(ncol(U))]
+  
+  for(i in 1:m){
+    idx <- sample(ncol(count),n)
+    X <- as.matrix(count[,idx])
+
+    Y <- sample(0:1,n,T,prob = c(p[i],1-p[i]))
+    
+    index <- sample(100,30)
+    w_space <- U[,index]
+    weight <- 1-2*runif(30)
+    
+    w <- (w_space%*%as.matrix(weight))[,1]
+    w <- (w-min(w)+1e-3)
+    w <- w/max(w)
+    w <- w/mean(w)*0.5
+
+    if(lib_var){
+      if(i%%2 == 1){
+        X_lib <- X%*%diag(sample(100:500,n,replace = T))
+      }else{
+        X_lib <- X%*%diag(sample(10:100,n,replace = T))
+        }
+    }else{
+      X_lib <- X
+    }
+   
+    meta_list[[i]] <- data.frame("Y" = Y) 
+    O_list[i] <- list(floor(diag(w)%*%X_lib))
+    w_list[i] <- list(w)
+    X_list[i] <- list(floor(X))
+  }
+  return(list(O_list, w_list, X_list, meta_list))
+}
+```
+
+
+```{r}
+t_test_res <- function(X,Y,alpha=0.1){
+  X <- X[rowSums(X)>0,]
+  t_p <- sapply(1:(nrow(X)), function(i)t.test(as.numeric(X[i,]) ~ Y)$p.value)
+  p <- p.adjust(t_p, method='BH')
+  return(mean(p<alpha))
+}
+```
+
+
+```{r}
+p1 <- c(0.5,0.5,0.5)
+p2 <- c(0.8,0.2,0.8)
+p3 <- c(0.99,0.01,0.99)
+p_list <- list(p1,p2,p3)
+
+
+m <- 3
+n <- 100
+beta <- 0.01
+gamma <- 1
+alpha <- 0.1
+d <- nrow(count)
+```
+
+```{r}
+set.seed(2025)
+all_meta_list <- list()
+for(i in 1:length(p_list)){
+  p <- p_list[[i]]
+  meta_list <- list()
+  Y.list <- lapply(1:m, function(k)sample(0:1,n,T,prob = c(p[k],1-p[k])))
+  for(j in 1:m){
+    meta_list[[j]] <- data.frame("Y" = Y.list[[j]])
+  }
+  all_meta_list[[i]] <- meta_list
+}
+```
+
+```{r}
+set.seed(2025)
+for (iter in 1:500) {
+  for(i in 1:length(p_list)){
+    # Initialize dataset
+    p <- p_list[[i]]
+    res <- init_dataset_da(m,n,count,dist,lib_var = T,p = p)
+    O_list <- res[[1]]
+    meta_list <- all_meta_list[[i]]
+    meta <- do.call(rbind,meta_list)
+    O <- do.call(cbind,O_list)
+    batchid <- as.factor(do.call(c,lapply(1:m, function(x)rep(x,n))))
+    meta$batch <- batchid
+
+    
+    # Set row names for matrices
+    rownames(O) <- paste("Taxon", 1:nrow(O))
+    colnames(O) <- rownames(meta) <-  paste("Sample", 1:ncol(O))
+    
+    
+    write.csv(O,paste0("../data/Simulation_data/fig5c/count/count_",i,"_iter",iter,".csv"))
+    write.csv(meta,paste0("../data/Simulation_data/fig5c/meta/meta_",i,"_iter",iter,".csv"))
+    save(O,meta,O_list,meta_list, file = paste0("../data/Simulation_data/fig5c/rdata/rdata_",i,"_iter",iter,".RData"))
+  }
+}
+```
+
+
+```{r, warning=F}
+fdr_table <- data.frame("FDR" = numeric(),"Method" = character(), "Level" = character())
+Level.list <- c("No Confounding Effect","Moderate Confounding Effect","Strong Confounding Effect")
+batchid <- as.factor(do.call(c,lapply(1:m, function(x)rep(x,n))))
+for(iter in 1:500){
+  for(i in 1:length(p_list)){
+    p <- p_list[[i]]
+    load(paste0("../data/Simulation_data/fig5c/rdata/rdata_",i,"_iter",iter,".RData"))
+  
+    Y <- as.factor(meta$Y)
+    
+    X <- metadict(O_list,alpha,beta,gamma,dist,meta_list)$X
+    res.ConQuR <- ConQuR(t(O),batchid,batch_ref = 1,covariates = Y)
+    res.ComBatSeq <- sva::ComBat_seq(as.matrix(O),batchid,Y)
+    res.mmuphin <- adjust_batch(feature_abd = O,
+                                  batch = "batch",
+                                  covariates = "Y",
+                                  data = meta)$feature_abd_adj
+    O_ref <- t(O)/colSums(O)
+    O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
+    colnames(O_ref) <- rownames(O)
+    rownames(O_ref) <- colnames(O)
+    res.percentile <- t(percentile_norm(O_ref, batchid, Y, 1))
+    
+    res_debiasm <- t(read.csv(paste0("../data/Simulation_data/fig5c/res_debiasm/debias_",i,"_iter",iter,".csv"), row.names = 1))
+      
+    
+    t_raw <- t_test_res(O,meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_raw,"Unprocessed",Level.list[i]))
+    
+    t_combatseq <- t_test_res(res.ComBatSeq,meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_combatseq,"ComBatSeq",Level.list[i]))
+    
+    t_mmuphin <- t_test_res(res.mmuphin,meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_mmuphin,"MMUPHin",Level.list[i]))
+    
+    t_metadict <- t_test_res(X,meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_metadict,"MetaDICT",Level.list[i]))
+    
+    t_conqur <- t_test_res(t(res.ConQuR),meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_conqur,"ConQuR",Level.list[i]))
+    
+    t_percentile <- t_test_res(res.percentile,meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_percentile,"Percentile-Norm",Level.list[i]))
+    
+    t_debiasm <- t_test_res(res_debiasm,meta$Y)
+    fdr_table <- rbind(fdr_table,c(t_debiasm,"DEBIAS-M",Level.list[i]))
+    
+  }
+  print(paste("Iter", iter, "is finished"))
+}
+```
+
+
+```{r}
+method <- unique(fdr_table$Method)
+res <- data.frame("FDR" = numeric(), "Method" = character(), "Level" = character())
+for(i in 1:length(method)){
+  res_sub <- fdr_table[which(fdr_table$Method==method[i]),]
+  for(j in unique(fdr_table$Level)){
+    res <- rbind(res,c(mean(res_sub$FDR[which(res_sub$Level == j)]), method[i], j))
+  }
+}
+
+colnames(res) = c("FDR","Method","Level")
+```
+
+```{r}
+library(ggplot2)
+library(RColorBrewer)
+
+p2 <- ggplot(res, aes(x = Level, y = FDR, color = Method)) +
+  geom_abline(intercept = 0.1, slope = 0, color = "black", linetype = "dashed", size = 1) +
+  geom_point(aes(shape = Method), size = 6) +
+  scale_shape_manual(values = 1:7) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    x = "Confounding Level",
+    y = "FDR",
+    title = "False Discovery Rate by Confounding Level"
+  ) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text  = element_text(size = 12),
+    legend.position = "right",
+    legend.title  = element_text(size = 14),
+    legend.text   = element_text(size = 12),
+  )
+```
+
+# S11b
+
+```{r}
+load("../data/CRC.RData")
+```
+
+
+```{r}
+p1 <- c(0.5,0.5,0.5)
+p2 <- c(0.8,0.5,0.15)
+p3 <- c(0.99,0.5,0.01)
+p_list <- list(p1,p2,p3)
+alpha <- 0.01
+beta <- 0.01
+gamma <- 1
+```
+
+```{r}
+n_zeller <- sum(meta_h$dataset == "Zeller")
+n_zack <- sum(meta_h$dataset == "Zackular")
+n_baxter <- sum(meta_h$dataset == "Baxter")
+```
+
+
+```{r}
+write.csv(count.h,"../data/Simulation_data/figS11b/count/count.csv")
+```
+
+```{r}
+set.seed(2025)
+for (iter in 1:500) {
+  for(i in 1:length(p_list)){
+    # Initialize dataset
+    p <- p_list[[i]]
+    meta_sim = meta_h
+    meta_sim$Y = 0
+    meta_sim$Y[which(meta_sim$dataset=="Zeller")] = rbinom(n_zeller,1,p[1])
+    meta_sim$Y[which(meta_sim$dataset=="Zackular")] = rbinom(n_zack,1,p[2])
+    meta_sim$Y[which(meta_sim$dataset=="Baxter")] = rbinom(n_baxter,1,p[3])
+    meta_sim$Y = as.factor(meta_sim$Y)
+    write.csv(meta_sim,paste0("../data/Simulation_data/figS11b/meta/meta_",i,"_iter",iter,".csv"))
+  }
+}
+```
+
+
+```{r, warning=FALSE}
+fdr_table <- data.frame("FDR" = numeric(),"Method" = character(), "Level" = character())
+Level.list <- c("No Confounding Effect","Moderate Confounding Effect","Strong Confounding Effect")
+
+for(iter in 1:500){
+  for(i in 1:3){
+    p <- p_list[[i]]
+    meta_h <- read.csv(paste0("../data/Simulation_data/figS11b/meta/meta_",i,"_iter",iter,".csv"), row.names = 1)
+    batchid <- as.factor(meta_h$dataset)
+    meta_h$Y <- as.factor(meta_h$Y)
+    
+    O_ref <- t(count.h)/colSums(count.h)
+    O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
+    colnames(O_ref) <- rownames(count.h)
+    rownames(O_ref) <- colnames(count.h)
+    res.percentile <- t(percentile_norm(O_ref, batchid, meta_h$Y, 1))
+    t_percentile <- t_test_res(res.percentile,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_percentile,"Percentile-Norm",Level.list[i]))
+    
+    
+    t_raw <- t_test_res(count.h,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_raw,"Unprocessed",Level.list[i]))
+    
+    res.ComBatSeq <- sva::ComBat_seq(as.matrix(count.h),batchid,group = meta_h$Y)
+    t_combatseq <- t_test_res(res.ComBatSeq,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_combatseq,"ComBatSeq",Level.list[i]))
+
+    meta_mmuphin <- meta_h[,c(4,5)]
+    res.mmuphin <- adjust_batch(feature_abd = count.h,
+                               batch = "dataset",
+                               covariates = "Y",
+                               data = meta_mmuphin)$feature_abd_adj
+    t_mmuphin <- t_test_res(res.mmuphin,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_mmuphin,"MMUPHin",Level.list[i]))
+    
+    otu_list <- list()
+    otu_list[[1]] <- as.matrix(count.h[,meta_h$dataset=="Zeller"])
+    otu_list[[2]] <- as.matrix(count.h[,meta_h$dataset=="Baxter"])
+    otu_list[[3]] <- as.matrix(count.h[,meta_h$dataset=="Zackular"])
+    
+    meta_list <- list()
+    meta_list[[1]] <- data.frame("Y" = meta_h$Y[meta_h$dataset=="Zeller"])
+    meta_list[[2]] <- data.frame("Y" = meta_h$Y[meta_h$dataset=="Baxter"])
+    meta_list[[3]] <- data.frame("Y" = meta_h$Y[meta_h$dataset=="Zackular"])
+    
+    metadict.res <- metadict(otu_list,alpha,beta,gamma,dist_genus.sub,meta_list)
+    X <- metadict.res$X
+    t_metadict <- t_test_res(X,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_metadict,"MetaDICT",Level.list[i]))
+    
+    res.ConQuR <- t(ConQuR(t(count.h),batchid = batchid, batch_ref = 'Baxter', covariates = meta_h$Y))
+    t_conqur <- t_test_res(res.ConQuR,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_conqur,"ConQuR",Level.list[i]))
+
+    
+    
+    res_debiasm <- t(read.csv(paste0("../data/Simulation_data/figS11b/res_debiasm/debias_",i,"_iter",iter,".csv"), row.names = 1))
+    t_debiasm <- t_test_res(res_debiasm,meta_h$Y)
+    fdr_table <- rbind(fdr_table,c(t_debiasm,"DEBIAS-M",Level.list[i]))
+  }
+  print(iter)
+}
+```
+
+
+```{r}
+method <- unique(fdr_table$Method)
+res <- data.frame("FDR" = numeric(), "Method" = character(), "Level" = character())
+for(i in 1:length(method)){
+  res_sub <- fdr_table[which(fdr_table$Method==method[i]),]
+  for(j in unique(fdr_table$Level)){
+    res <- rbind(res,c(mean(res_sub$FDR[which(res_sub$Level == j)]), method[i], j))
+  }
+}
+
+colnames(res) = c("FDR","Method","Level")
+```
+
+
+```{r}
+library(ggplot2)
+ ggplot(res, aes(x = Level, y = FDR, color = Method)) +
+  geom_abline(intercept = 0.1, slope = 0, color = "black", linetype = "dashed", size = 1) +
+  geom_point(aes(shape = Method), size = 6) +
+  scale_shape_manual(values = 1:7) +
+  scale_color_brewer(palette = "Dark2") +
+  labs(
+    x = "Confounding Level",
+    y = "FDR",
+    title = "False Discovery Rate by Confounding Level"
+  ) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+  theme_bw(base_family = "Georgia") +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 14, face = "bold"),
+    axis.text  = element_text(size = 12),
+    legend.position = "right",
+    legend.title  = element_text(size = 14),
+    legend.text   = element_text(size = 12),
+  )
+```

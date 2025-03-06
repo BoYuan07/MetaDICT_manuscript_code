@@ -1,0 +1,992 @@
+```{r}
+library(ConQuR)
+library(doParallel)
+library(MMUPHin)
+library(SparseDOSSA2)
+library(ggpubr)
+library(ggplot2)
+library(PLSDAbatch)
+source("./function.R")
+```
+
+
+# SparseDOSSA2 for multiple datasets
+
+```{r}
+load("../data/CRC.RData")
+```
+
+```{r}
+count.h <- as.data.frame(count.h)
+dataset1 <- count.h[,which(meta_h$dataset=="Zeller")[1:30]]
+dataset2 <- count.h[,which(meta_h$dataset=="Baxter")[1:30]]
+```
+
+```{r}
+filtered_taxa <- (rowSums(dataset1!=0)>3)&(rowSums(dataset2!=0)>3) # filtered out <10% prevalence taxa, required by SparseDOSSA2
+```
+
+
+```{r}
+dataset1 <- dataset1[filtered_taxa,]
+dataset2 <- dataset2[filtered_taxa,]
+```
+
+```{r}
+# fit model using two real datasets
+fitted1 <- fit_SparseDOSSA2(data = dataset1,
+                           control = list(verbose = TRUE))
+
+fitted2 <- fit_SparseDOSSA2(data = dataset2,
+                           control = list(verbose = TRUE))
+```
+
+
+```{r}
+fitted_feature <- rownames(dataset1) = rownames(dataset2)
+d <- length(fitted_feature)
+# number of samples in each dataset
+n <- 100
+```
+
+
+# Fig S6
+
+```{r}
+set.seed(2024)
+m <- 2
+# randomly select 5% data as differential abundant taxa 
+dtaxa <- floor(0.05*d)
+selected_taxa <- sample(1:d, dtaxa, replace = F)
+associated_property <- rep("abundance",dtaxa)
+effect_size <- rep(5,dtaxa)
+# simulate biological group for dataset1
+Y1 <- rbinom(n,1,0.5)
+# simulate biological group for dataset2
+Y2 <- rbinom(n,1,0.5)
+
+mat_meta1 <- data.frame("Y" = Y1, "Y2" = rbinom(n,1,0.5))
+mat_meta2 <- data.frame("Y" = Y2, "Y2" = rbinom(n,1,0.5))
+
+# table of spike-in taxa, required by SparseDOSSA2
+spike_metadata <- data.frame("metadata_datum" = rep(1,dtaxa), "feature_spiked" = fitted_feature[selected_taxa], "effect_size" = effect_size)
+df_metadata_spike <- spike_metadata %>% tidyr::crossing(associated_property = c("abundance", "prevalence"))
+```
+
+```{r}
+# simulate two batches
+set.seed(2024)
+sim1 <- SparseDOSSA2::SparseDOSSA2(
+    template = fitted1,
+    n_sample = nrow(mat_meta1), 
+    new_features = FALSE,
+    spike_metadata =  df_metadata_spike,
+    metadata_matrix = as.matrix(mat_meta1), 
+    median_read_depth = mean(colSums(dataset1)),
+    verbose = FALSE
+    )
+
+sim2 <- SparseDOSSA2::SparseDOSSA2(
+    template = fitted2,
+    n_sample = nrow(mat_meta2), 
+    new_features = FALSE,
+    spike_metadata =  df_metadata_spike,
+    metadata_matrix = as.matrix(mat_meta2), 
+    median_read_depth = mean(colSums(dataset2)),
+    verbose = FALSE)
+```
+
+```{r}
+simulated1 <- sim1$simulated_data
+simulated2 <- sim2$simulated_data
+O <- cbind(simulated1, simulated2)
+meta <- rbind(mat_meta1, mat_meta2)
+meta$batch <- c(rep("Dataset 1", n), rep("Dataset 2", n))
+
+meta$Y <- sapply(as.numeric(meta$Y)+1,function(i)paste("Group",i))
+meta$Y2 <- sapply(as.numeric(meta$Y2)+1,function(i)paste("Group",i))
+
+dataset_info <- meta$batch
+sample_info <- meta$Y
+
+# Create a version of meta without the primary group label (Y)
+meta_sub <- meta[ , -1]
+
+O_list <- list(as.matrix(simulated1),as.matrix(simulated2))
+meta.list <- list(data.frame("Y" = mat_meta1[,-2]), data.frame("Y" = mat_meta2[,-2]))
+meta.list.sub <- list(data.frame("Y2" = mat_meta1[,-1]), data.frame("Y2" = mat_meta2[,-1]))
+dist <- dist_genus.sub[fitted_feature,fitted_feature]
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (1) Setup & labeling
+#------------------------------------------------------------------------------
+rownames(O) <- paste0("Taxon", seq_len(nrow(O)))
+colnames(O) <- paste0("Sample", seq_len(ncol(O)))
+
+#------------------------------------------------------------------------------
+# (2) PCoA for unprocessed data
+#------------------------------------------------------------------------------
+p1.1 <- pcoa.plot.discrete(
+  O,
+  dataset_info,
+  "Unprocessed",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p1.2 <- pcoa.plot.discrete(
+  O,
+  sample_info,
+  "Unprocessed",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (3) MetaDICT analysis
+#------------------------------------------------------------------------------
+
+alpha <- 0.01
+beta <- 0.01
+gamma <- 1
+
+metadict_res_1 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list.sub)  # without Y
+metadict_res_2 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list)      # with Y
+
+p3.1 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p3.2 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  sample_info,
+  "MetaDICT",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p3.3 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p3.4 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  sample_info,
+  "MetaDICT",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (4) Percentile normalization
+#------------------------------------------------------------------------------
+O_ref <- t(O) / colSums(O)
+O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 1e-6)
+
+colnames(O_ref) <- paste0("Taxon",  seq_len(ncol(O_ref)))
+rownames(O_ref) <- paste0("Sample", seq_len(nrow(O_ref)))
+
+res_percentile_1 <- percentile_norm(O_ref, dataset_info, meta$Y2, "Group 1")
+res_percentile_2 <- percentile_norm(O_ref, dataset_info, meta$Y,  "Group 1")
+
+p7.1 <- pcoa.plot.discrete(
+  t(res_percentile_1),
+  dataset_info,
+  "Percentile-Norm",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p7.2 <- pcoa.plot.discrete(
+  t(res_percentile_1),
+  sample_info,
+  "Percentile-Norm",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p7.3 <- pcoa.plot.discrete(
+  t(res_percentile_2),
+  dataset_info,
+  "Percentile-Norm",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p7.4 <- pcoa.plot.discrete(
+  t(res_percentile_2),
+  sample_info,
+  "Percentile-Norm",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (5) PLSDA
+#------------------------------------------------------------------------------
+O.clr       <- microbiome::transform(O, "clr")
+res_plsda_1 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y2, Y.bat = dataset_info)$X.nobatch
+res_plsda_2 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y,  Y.bat = dataset_info)$X.nobatch
+
+p8.1 <- pcoa.plot.discrete(
+  t(res_plsda_1),
+  dataset_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p8.2 <- pcoa.plot.discrete(
+  t(res_plsda_1),
+  sample_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p8.3 <- pcoa.plot.discrete(
+  t(res_plsda_2),
+  dataset_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p8.4 <- pcoa.plot.discrete(
+  t(res_plsda_2),
+  sample_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (6) scANVI results
+#------------------------------------------------------------------------------
+res_scvi_1 = read.csv("../data/Simulation_data/other_sim/scvi_res_sparseDOSSA_1_confounded_batch.csv", row.names = 1)
+res_scvi_2 = read.csv("../data/Simulation_data/other_sim/scvi_res_sparseDOSSA_2_confounded_batch.csv", row.names = 1)
+
+
+p9.1 <- pcoa.plot.discrete(
+  t(res_scvi_1),
+  dataset_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p9.2 <- pcoa.plot.discrete(
+  t(res_scvi_1),
+  sample_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p9.3 <- pcoa.plot.discrete(
+  t(res_scvi_2),
+  dataset_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p9.4 <- pcoa.plot.discrete(
+  t(res_scvi_2),
+  sample_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (7) DEBIAS-M results
+#------------------------------------------------------------------------------
+res_debiasm_1 = read.csv("../data/Simulation_data/other_sim/debiasm_res_sparseDOSSA_1.csv", row.names = 1)
+res_debiasm_2 = read.csv("../data/Simulation_data/other_sim/debiasm_res_sparseDOSSA_2.csv", row.names = 1)
+
+p10.1 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p10.2 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  sample_info,
+  "DEBIAS-M",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p10.3 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p10.4 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  sample_info,
+  "DEBIAS-M",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (8) ComBat-Seq
+#------------------------------------------------------------------------------
+res_ComBatSeq_1 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = as.data.frame(meta_sub[,-2])  # without Y
+)
+res_ComBatSeq_2 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = meta[,-3]                    # with Y
+)
+
+p5.1 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p5.2 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  sample_info,
+  "ComBatSeq",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p5.3 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p5.4 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  sample_info,
+  "ComBatSeq",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (9) MMUPHin
+#------------------------------------------------------------------------------
+colnames(O)    <- paste0("Sample", seq_len(ncol(O)))
+rownames(meta) <- paste0("Sample", seq_len(ncol(O)))
+meta$batch     <- as.factor(meta$batch)
+
+res_mmuphin_1 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = "Y2",
+  data        = meta
+)$feature_abd_adj
+res_mmuphin_2 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = c("Y","Y2"),
+  data        = meta
+)$feature_abd_adj
+
+p6.1 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p6.2 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  sample_info,
+  "MMUPHin",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p6.3 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p6.4 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  sample_info,
+  "MMUPHin",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (10) ConQuR
+#------------------------------------------------------------------------------
+batchid <- as.factor(do.call(c, lapply(seq_len(m), function(x) rep(x, n))))
+tax_tab <- t(O)
+
+res_ConQuR_1 <- ConQuR_libsize(tax_tab, batchid, batch_ref = 1, covariates = as.data.frame(meta_sub[,-2]))
+meta$Y       <- as.factor(meta$Y)
+res_ConQuR_2 <- ConQuR_libsize(tax_tab, batchid, batch_ref = 1, covariates = meta[,-3])
+
+p4.1 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p4.2 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  sample_info,
+  "ConQuR",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p4.3 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p4.4 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  sample_info,
+  "ConQuR",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+
+```{r}
+library(ggpubr)
+
+#------------------------------------------------------------------------------
+# (12) Figure arrangement
+#------------------------------------------------------------------------------
+ggarrange(
+  p1.1, p3.1, p4.1, p5.1,
+  p6.1, p7.1, p8.1, p9.1, p10.1,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_nocov_batch.jpeg", dpi=300, units="in", width=20, height=3)
+
+ggarrange(
+  p1.2, p3.2, p4.2, p5.2,
+  p6.2, p7.2, p8.2, p9.2, p10.2,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_nocov_sample.jpeg", dpi=300, units="in", width=20, height=3)
+
+ggarrange(
+  p1.1, p3.3, p4.3, p5.3,
+  p6.3, p7.3, p8.3, p9.3, p10.3,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_cov_batch.jpeg", dpi = 300, units = "in", width = 20, height = 3)
+
+ggarrange(
+  p1.2, p3.4, p4.4, p5.4,
+  p6.4, p7.4, p8.4, p9.4, p10.4,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_cov_sample.jpeg", dpi = 300, units = "in", width = 20, height = 3)
+```
+
+
+# Fig S7
+
+```{r}
+set.seed(2024)
+dtaxa <- floor(0.05*d)
+selected_taxa <- sample(1:d, dtaxa, replace = F)
+associated_property <- rep("abundance",dtaxa)
+effect_size <- rep(5,dtaxa)
+Y1 <- rbinom(n,1,0.1)
+Y2 <- rbinom(n,1,0.9)
+```
+
+```{r}
+mat_meta1 <- data.frame("Y" = Y1, "Y2" = rbinom(n,1,0.5))
+mat_meta2 <- data.frame("Y" = Y2, "Y2" = rbinom(n,1,0.5))
+```
+
+```{r}
+spike_metadata <- data.frame("metadata_datum" = rep(1,dtaxa), "feature_spiked" = fitted_feature[selected_taxa], "effect_size" = effect_size)
+df_metadata_spike <- spike_metadata %>% tidyr::crossing(associated_property = c("abundance", "prevalence"))
+```
+
+```{r}
+set.seed(2024)
+sim1 <- SparseDOSSA2::SparseDOSSA2(
+    template = fitted1,
+    n_sample = nrow(mat_meta1), 
+    new_features = FALSE,
+    spike_metadata =  df_metadata_spike,
+    metadata_matrix = as.matrix(mat_meta1), 
+    median_read_depth = mean(colSums(dataset1)),
+    verbose = FALSE
+    )
+
+sim2 <- SparseDOSSA2::SparseDOSSA2(
+    template = fitted1,
+    n_sample = nrow(mat_meta2), 
+    new_features = FALSE,
+    spike_metadata =  df_metadata_spike,
+    metadata_matrix = as.matrix(mat_meta2), 
+    median_read_depth = mean(colSums(dataset1)),
+    verbose = FALSE)
+```
+
+```{r}
+simulated1 <- sim1$simulated_data
+simulated2 <- sim2$simulated_data
+
+O <- cbind(simulated1, simulated2)
+meta <- rbind(mat_meta1, mat_meta2)
+meta$batch <- c(rep("Dataset 1", n), rep("Dataset 2", n))
+
+meta$Y <- sapply(as.numeric(meta$Y)+1,function(i)paste("Group",i))
+meta$Y2 <- sapply(as.numeric(meta$Y2)+1,function(i)paste("Group",i))
+
+dataset_info <- meta$batch
+sample_info <- meta$Y
+
+# Create a version of meta without the primary group label (Y)
+meta_sub <- meta[ , -1]
+
+O_list <- list(as.matrix(simulated1),as.matrix(simulated2))
+meta.list <- list(data.frame("Y" = mat_meta1[,-2]), data.frame("Y" = mat_meta2[,-2]))
+meta.list.sub <- list(data.frame("Y2" = mat_meta1[,-1]), data.frame("Y2" = mat_meta2[,-1]))
+dist <- dist_genus.sub[fitted_feature,fitted_feature]
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (1) Setup & labeling
+#------------------------------------------------------------------------------
+rownames(O) <- paste0("Taxon", seq_len(nrow(O)))
+colnames(O) <- paste0("Sample", seq_len(ncol(O)))
+
+#------------------------------------------------------------------------------
+# (2) PCoA for unprocessed data
+#------------------------------------------------------------------------------
+p1.1 <- pcoa.plot.discrete(
+  O,
+  dataset_info,
+  "Truth",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p1.2 <- pcoa.plot.discrete(
+  O,
+  sample_info,
+  "Truth",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+
+
+
+#------------------------------------------------------------------------------
+# (3) MetaDICT analysis
+#------------------------------------------------------------------------------
+
+alpha <- 0.1
+beta <- 0.1
+gamma <- 1
+
+metadict_res_1 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list.sub)  # without Y
+metadict_res_2 <- metadict(O_list, alpha, beta, gamma, dist, meta.list = meta.list)      # with Y
+
+p3.1 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p3.2 <- pcoa.plot.discrete(
+  metadict_res_1$X,
+  sample_info,
+  "MetaDICT",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p3.3 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  dataset_info,
+  "MetaDICT",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p3.4 <- pcoa.plot.discrete(
+  metadict_res_2$X,
+  sample_info,
+  "MetaDICT",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (4) Percentile normalization
+#------------------------------------------------------------------------------
+O_ref <- t(O) / colSums(O)
+O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 1e-6)
+
+colnames(O_ref) <- paste0("Taxon",  seq_len(ncol(O_ref)))
+rownames(O_ref) <- paste0("Sample", seq_len(nrow(O_ref)))
+
+res_percentile_1 <- percentile_norm(O_ref, dataset_info, meta$Y2, "Group 1")
+res_percentile_2 <- percentile_norm(O_ref, dataset_info, meta$Y,  "Group 1")
+
+p7.1 <- pcoa.plot.discrete(
+  t(res_percentile_1),
+  dataset_info,
+  "Percentile-Norm",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p7.2 <- pcoa.plot.discrete(
+  t(res_percentile_1),
+  sample_info,
+  "Percentile-Norm",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p7.3 <- pcoa.plot.discrete(
+  t(res_percentile_2),
+  dataset_info,
+  "Percentile-Norm",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p7.4 <- pcoa.plot.discrete(
+  t(res_percentile_2),
+  sample_info,
+  "Percentile-Norm",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (5) PLSDA
+#------------------------------------------------------------------------------
+O.clr       <- microbiome::transform(O, "clr")
+res_plsda_1 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y2, Y.bat = dataset_info)$X.nobatch
+res_plsda_2 <- PLSDA_batch(t(O.clr), Y.trt = meta$Y,  Y.bat = dataset_info)$X.nobatch
+
+p8.1 <- pcoa.plot.discrete(
+  t(res_plsda_1),
+  dataset_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p8.2 <- pcoa.plot.discrete(
+  t(res_plsda_1),
+  sample_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p8.3 <- pcoa.plot.discrete(
+  t(res_plsda_2),
+  dataset_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p8.4 <- pcoa.plot.discrete(
+  t(res_plsda_2),
+  sample_info,
+  "PLSDA-batch",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (6) scANVI results
+#------------------------------------------------------------------------------
+res_scvi_1 = read.csv("../data/Simulation_data/other_sim/scvi_res_sparseDOSSA_1.csv", row.names = 1)
+res_scvi_2 = read.csv("../data/Simulation_data/other_sim/scvi_res_sparseDOSSA_2.csv", row.names = 1)
+
+p9.1 <- pcoa.plot.discrete(
+  t(res_scvi_1),
+  dataset_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p9.2 <- pcoa.plot.discrete(
+  t(res_scvi_1),
+  sample_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p9.3 <- pcoa.plot.discrete(
+  t(res_scvi_2),
+  dataset_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p9.4 <- pcoa.plot.discrete(
+  t(res_scvi_2),
+  sample_info,
+  "scANVI",
+  distance = "euclidean",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (7) DEBIAS-M results
+#------------------------------------------------------------------------------
+res_debiasm_1 = read.csv("../data/Simulation_data/other_sim/debiasm_res_sparseDOSSA_1_confounded_batch.csv", row.names = 1)
+res_debiasm_2 = read.csv("../data/Simulation_data/other_sim/debiasm_res_sparseDOSSA_2_confounded_batch.csv", row.names = 1)
+
+p10.1 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p10.2 <- pcoa.plot.discrete(
+  t(res_debiasm_1),
+  sample_info,
+  "DEBIAS-M",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p10.3 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  dataset_info,
+  "DEBIAS-M",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p10.4 <- pcoa.plot.discrete(
+  t(res_debiasm_2),
+  sample_info,
+  "DEBIAS-M",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (8) ComBat-Seq
+#------------------------------------------------------------------------------
+res_ComBatSeq_1 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = as.data.frame(meta_sub[,-2])  # without Y
+)
+res_ComBatSeq_2 <- sva::ComBat_seq(
+  as.matrix(O),
+  batch      = dataset_info,
+  covar_mod  = meta[,-3]                    # with Y
+)
+
+p5.1 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p5.2 <- pcoa.plot.discrete(
+  res_ComBatSeq_1,
+  sample_info,
+  "ComBatSeq",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p5.3 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  dataset_info,
+  "ComBatSeq",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p5.4 <- pcoa.plot.discrete(
+  res_ComBatSeq_2,
+  sample_info,
+  "ComBatSeq",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+
+#------------------------------------------------------------------------------
+# (9) MMUPHin
+#------------------------------------------------------------------------------
+colnames(O)    <- paste0("Sample", seq_len(ncol(O)))
+rownames(meta) <- paste0("Sample", seq_len(ncol(O)))
+meta$batch     <- as.factor(meta$batch)
+
+res_mmuphin_1 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = "Y2",
+  data        = meta
+)$feature_abd_adj
+res_mmuphin_2 <- adjust_batch(
+  feature_abd = O,
+  batch       = "batch",
+  covariates  = c("Y","Y2"),
+  data        = meta
+)$feature_abd_adj
+
+p6.1 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p6.2 <- pcoa.plot.discrete(
+  res_mmuphin_1,
+  sample_info,
+  "MMUPHin",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p6.3 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  dataset_info,
+  "MMUPHin",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p6.4 <- pcoa.plot.discrete(
+  res_mmuphin_2,
+  sample_info,
+  "MMUPHin",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (10) ConQuR
+#------------------------------------------------------------------------------
+batchid <- as.factor(do.call(c, lapply(seq_len(m), function(x) rep(x, n))))
+tax_tab <- t(O)
+
+res_ConQuR_1 <- ConQuR_libsize(tax_tab, batchid, batch_ref = 1, covariates = as.data.frame(meta_sub[,-2]))
+meta$Y       <- as.factor(meta$Y)
+res_ConQuR_2 <- ConQuR_libsize(tax_tab, batchid, batch_ref = 1, covariates = meta[,-3])
+
+p4.1 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p4.2 <- pcoa.plot.discrete(
+  t(res_ConQuR_1),
+  sample_info,
+  "ConQuR",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+p4.3 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  dataset_info,
+  "ConQuR",
+  colorset  = "Set1",
+  pointsize = 0.2
+)
+p4.4 <- pcoa.plot.discrete(
+  t(res_ConQuR_2),
+  sample_info,
+  "ConQuR",
+  colorset  = "Dark2",
+  pointsize = 0.2
+)
+```
+
+
+```{r}
+#------------------------------------------------------------------------------
+# (12) Figure arrangement
+#------------------------------------------------------------------------------
+ggarrange(
+  p1.1, p3.1, p4.1, p5.1,
+  p6.1, p7.1, p8.1, p9.1, p10.1,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_nocov_batch_confounded.jpeg", dpi=300, units="in", width=20, height=3)
+
+ggarrange(
+  p1.2, p3.2, p4.2, p5.2,
+  p6.2, p7.2, p8.2, p9.2, p10.2,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_nocov_sample_confounded.jpeg", dpi=300, units="in", width=20, height=3)
+
+ggarrange(
+  p1.1, p3.3, p4.3, p5.3,
+  p6.3, p7.3, p8.3, p9.3, p10.3,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_cov_batch_confounded.jpeg", dpi = 300, units = "in", width = 20, height = 3)
+
+ggarrange(
+  p1.2, p3.4, p4.4, p5.4,
+  p6.4, p7.4, p8.4, p9.4, p10.4,
+  common.legend = TRUE, ncol = 9, nrow = 1, legend = "bottom"
+)
+ggsave("../fig/pcoa_sparseDOSSA_cov_sample_confounded.jpeg", dpi = 300, units = "in", width = 20, height = 3)
+```
+
