@@ -13,7 +13,7 @@ source("./function.R")
 # SparseDOSSA2 for multiple datasets
 
 ```{r}
-load("../data/CRC.RData")
+load("../data/CRC_Duvallet.RData")
 ```
 
 ```{r}

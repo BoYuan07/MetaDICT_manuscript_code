@@ -596,9 +596,6 @@ ggarrange(
 ggsave("../fig/pcoa_sim4_cov_sample.jpeg", dpi = 300, units = "in", width = 20, height = 3)
 ```
 
-```{r}
-save.image(file = "../result/Fig3.RData")
-```
 
 
 # Batch effect & batches are confounded with biological variable.

@@ -206,7 +206,7 @@ colnames(res) = c("FDR","Method","Level")
 library(ggplot2)
 library(RColorBrewer)
 
-p2 <- ggplot(res, aes(x = Level, y = FDR, color = Method)) +
+ggplot(res, aes(x = Level, y = FDR, color = Method)) +
   geom_abline(intercept = 0.1, slope = 0, color = "black", linetype = "dashed", size = 1) +
   geom_point(aes(shape = Method), size = 6) +
   scale_shape_manual(values = 1:7) +
@@ -231,7 +231,7 @@ p2 <- ggplot(res, aes(x = Level, y = FDR, color = Method)) +
 # S11b
 
 ```{r}
-load("../data/CRC.RData")
+load("../data/CRC_Duvallet.RData")
 ```
 
 

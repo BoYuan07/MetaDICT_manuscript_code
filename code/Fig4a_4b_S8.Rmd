@@ -359,8 +359,8 @@ p10 = cluster_graph(c_scvi_s$g, sample_res_scvi, meta$Y, "scANVI", colorset = "S
 
 ```{r}
 library(ggpubr)
-#ggarrange(p1,p3,p4,p5,p6,p7,p8,p9,p10,common.legend = TRUE,ncol = 9, nrow=1,legend="bottom")
-#ggsave("../fig/sample_cluster_cov.jpeg", dpi=300, units="in", width=20, height=3)
+ggarrange(p1,p3,p4,p5,p6,p7,p8,p9,p10,common.legend = TRUE,ncol = 9, nrow=1,legend="bottom")
+ggsave("../fig/sample_cluster_cov.jpeg", dpi=300, units="in", width=20, height=3)
 ```
 
 

@@ -20,10 +20,6 @@ dist = read.csv("../data/dist_order.csv")
 dist = as.matrix(dist[,-1])
 ```
 
-```{r}
-load("../result/Fig2cd.RData")
-```
-
 
 # pcoa: Fig2 (c)-(d)
 
