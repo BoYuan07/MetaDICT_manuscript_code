@@ -391,9 +391,9 @@ for(iter in 1:500){
 
   # Split indices for training and testing
   split.ind = c(1:n)  
-  train_test_split <- function(data, split.ind) list(train = data[,-split.ind], test = data[,split.ind])
-  Y_split <- list(train = Y[-split.ind],test = Y[split.ind])
-  Y_f_split <- list(train = Y_f[-split.ind],test = Y_f[split.ind])
+  train_test_split <- function(data, split.ind) list(train = data[,split.ind], test = data[,-split.ind])
+  Y_split <- list(train = Y[split.ind],test = Y[-split.ind])
+  Y_f_split <- list(train = Y_f[split.ind],test = Y_f[-split.ind])
   
   res.metadict <- metadict(O_list, alpha, beta, gamma, dist, meta_list)
   X <- res.metadict$X

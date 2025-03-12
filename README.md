@@ -5,8 +5,12 @@ This is the repository archiving code and data for Microbiome Data Integration v
 The "data" folder contains datasets we use in the manuscript. 
 
 The "code" folder contains the RScript and Rmarkdown files for the algorithm and results in the manuscript. 
-The file preprocessing.Rmd includes code to generate simulated data.
-The file function.R includes the code for MetaDICT. Results can be replicated by corresponding files.
+The file *preprocessing.Rmd* contains code for processing He’s data, which serves as the foundation for generating simulated data.
+The file function.R includes the code for MetaDICT. 
+
+We evaluated the performance of eight methods in the manuscript. DEBIAS-M and scANVI were implemented in Python, while the remaining methods were implemented in R. For the simulation experiments, first, generate the data and save the simulated count and metadata tables. Next, run DEBIAS-M and scANVI in Python (examples for executing these methods can be found in *DEBIAS-M_implementation.ipynb* and *scANVI_implementation.ipynb*). Finally, perform downstream analysis using the R Markdown file.
+
+For experiments implemented in the R script, execute the script 500 times using different random seeds.
 
 # Reference
 Bo Yuan, Shulei Wang,
