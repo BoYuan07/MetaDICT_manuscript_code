@@ -85,3 +85,9 @@ loaded via a namespace (and not attached):
 [199] GUniFrac_1.8             ModelMetrics_1.2.2.2     munsell_0.5.1            KernSmooth_2.23-24       BiocStyle_2.34.0         data.table_1.16.4       
 [205] htmlwidgets_1.6.4        RColorBrewer_1.1-3       hwriter_1.3.2.1          rlang_1.1.4              lmerTest_3.1-3           ShortRead_1.64.0        
 [211] dada2_1.34.0             hardhat_1.4.0            prodlim_2024.06.25   
+
+Python version 3.9.21 for DEBIAS-M, python version 3.11.11 for scANVI. The version selection is based on the software's requirements.
+
+For experiments of Figure 7c:
+Python version 3.11.0, scikit-learn=1.6.0, torch=2.3.1, pandas=2.2.3, numpy=1.26.4.
+
