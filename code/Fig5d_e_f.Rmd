@@ -135,33 +135,35 @@ for(iter in 1:500){
 ```
 
 ```{r}
-# prediction function
-knn_pred <- function(train,test,Y_train,Y_test){
-  test_pred <- class::knn(train = t(train), test = t(test), cl = Y_train, k=25)
-  actual <- Y_test
-  roc_object <- roc(actual,as.numeric(test_pred))
-  return(auc(roc_object))
+knn_pred = function(train, test, Y_train, Y_test){
+  test_pred <- class::knn(train = t(train), test = t(test), cl = Y_train, k = 25, prob = TRUE)
+  probs <- attr(test_pred, "prob")
+  positive_class <- "Class1"
+  positive_probs <- ifelse(test_pred == positive_class, probs, 1 - probs)
+  roc_object <- roc(Y_test, positive_probs, direction = "<")
+  return(list("AUC" = auc(roc_object), "Object" = roc_object))
 }
 
-RF_pred <- function(train,test,trainy,testy){
-  control <- trainControl(method = "cv",          # Cross-validation
-                          number = 5,             # Number of folds
-                          summaryFunction = twoClassSummary,  # For ROC
-                          classProbs = TRUE)       # Enable probabilities for ROC
-  dataset <- data.frame(trainy,t(train))
-  rf <- train(trainy~., data=dataset, 
-                  method="rf", 
-                  metric='ROC',
-                  trControl=control,
-                  ntree = 500)
-  # ensure names are matched
-  rownames(test) <- colnames(dataset)[-1]
-  test_pred <- predict(rf, newdata = t(test))
-  actual <- testy
-  roc_object <- roc(actual,as.numeric(test_pred))
-  return(auc(roc_object))
+RF_pred <- function(train, test, trainy, testy){
+  control <- trainControl(method = "cv", 
+                          number = 5, 
+                          summaryFunction = twoClassSummary, 
+                          classProbs = TRUE)
+  dataset = data.frame(trainy, t(train))
+  rf <- train(trainy ~ ., data = dataset, method = "rf", metric = 'ROC', trControl = control, ntree = 500)
+  rownames(test) = colnames(dataset)[-1]
+  test_pred <- predict(rf, newdata = t(test), type = "prob")
+  positive_probs <- test_pred[["Class1"]]
+  roc_object <- roc(response = testy, predictor = positive_probs, direction = "<")
+  return(list("AUC" = auc(roc_object), "Object" = roc_object))
+}
+random_pred <- function(testy) {
+  random_probs <- rep(0.5,length(testy))
+  roc_obj <- roc(response = testy, predictor = random_probs, direction = "<")
+  return(list("AUC" = auc(roc_obj), "Object" = roc_obj))
 }
 ```
+
 
 ```{r}
 # helper function
@@ -173,19 +175,22 @@ ref_convert = function(O){
   return(O_ref)
 }
 # Prediction and table updating function
-update_table <- function(table, model, data, labels, method, variant, control, extra) {
-  if(model == "Random Forest"){
-    pred <- RF_pred(data$train, data$test, labels$train, labels$test)
-  }else if(model == "K-NN"){
-    pred <- knn_pred(data$train, data$test, labels$train, labels$test)
-  }
-  rbind(table, c(pred, model, control, method, variant, extra))
+update_table <- function(table, model, data, labels, method, variant, control, roc_list) {
+  pred <- if (model == "Random Forest") RF_pred(data$train, data$test, labels$train, labels$test)
+          else knn_pred(data$train, data$test, labels$train, labels$test)
+  roc_obj <- pred$Object
+  auc_val <- pred$AUC
+  row <- data.frame(AUC = auc_val, Model = model, Control = control, Method = method, Variant = variant)
+  table <- rbind(table, row)
+  key <- paste(method, variant, control, model, sep = "_")
+  roc_list[[key]] <- roc_obj
+  return(list(table = table, roc_list = roc_list))
 }
   
   
 # Apply batch correction methods
 methods <- list(
-  ConQuR = function(O, meta) t(ConQuR(t(O), batchid, batch_ref = 2, covariates = meta$Y)),
+  ConQuR = function(O, meta) t(ConQuR(t(O), batchid, batch_ref = 1, covariates = meta$Y)),
   ComBatSeq = function(O, meta) sva::ComBat_seq(as.matrix(O), batchid, group = meta$Y),
   MMUPHin = function(O, meta) adjust_batch(feature_abd = O, batch = "batch", covariates = "Y", data = meta)$feature_abd_adj,
   PLSDA = function(O, meta) t(PLSDA_batch(t(microbiome::transform(O, "clr")), meta$Y, batchid)$X.nobatch),
@@ -197,7 +202,13 @@ methods <- list(
 ## transfer learning
 
 ```{r, warning=F}
-table <- c()
+table <- data.frame()
+roc_objects <- list()
+delong_results <- data.frame()
+controls <- c("Sample")
+models <- c("Random Forest", "K-NN")
+
+
 for(iter in 1:500){
   load(paste0("../data/Simulation_data/fig5ef/rdata/rdata_iter",iter,".RData"))
   
@@ -216,6 +227,7 @@ for(iter in 1:500){
   X1 <- res.metadict1$X
   
   batch_corrected <- lapply(methods, function(f) list(with = f(O, meta), without = f(O, meta1)))
+  batch_corrected$Unprocessed <- list(with = O, without = O)
   batch_corrected$MetaDICT <- list(with = X, without = X1)
   
   res.debiasm1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_1.csv"),row.names = 1)
@@ -225,60 +237,93 @@ for(iter in 1:500){
   res.scanvi1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_1.csv"),row.names = 1)
   res.scanvi2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_2.csv"),row.names = 1)
   batch_corrected$scANVI <- list(with = t(res.scanvi1), without = t(res.scanvi2))
- 
+
   
-  controls <- c("Sample")
-  
-  # Add predictions for all methods and control cases
-  for (method_name in names(batch_corrected)) {
+  # Add predictions
+   for (method_name in names(batch_corrected)) {
     for (variant in c("with", "without")) {
       for (control in controls) {
         label_set <- if (control == "Sample") Y_split else Y_f_split
-        table <- update_table(
-          table, "Random Forest", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
-          label_set, method_name, variant, control, ez
-        )
+        for (model in models) {
+          res <- update_table(table, model, train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+                              label_set, method_name, variant, control, roc_objects)
+          table <- res$table
+          roc_objects <- res$roc_list
+        }
       }
     }
-  }
-  
-  # Add K-NN predictions
-  for (method_name in names(batch_corrected)) {
-    for (variant in c("with", "without")) {
-      for (control in controls) {
-        label_set <- if (control == "Sample") Y_split else Y_f_split
-        table <- update_table(
-          table, "K-NN", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
-          label_set, method_name, variant, control, ez
-        )
-      }
-    }
-  }
-  
-  # Add predictions for the unprocessed data
+   }
+  # DeLong’s test between MetaDICT and other methods
+  methods_to_compare <- setdiff(names(batch_corrected), "MetaDICT")
+
   for (control in controls) {
-    label_set <- if (control == "Sample") Y_split else Y_f_split
-    table <- update_table(
-      table, "Random Forest", train_test_split(O, split.ind),
-      label_set, "Unprocessed", "with", control, ez
-    )
-    table <- update_table(
-      table, "K-NN", train_test_split(O, split.ind),
-      label_set, "Unprocessed", "with", control, ez
-    )
-  }
+    if (control == "Sample"){
+      for (variant in c("with", "without")) {
+      for (model in models) {
+        key_metadict <- paste("MetaDICT", variant, control, model, sep = "_")
+        roc_metadict <- roc_objects[[key_metadict]]
+        for (method_name in methods_to_compare) {
+          key_compare <- paste(method_name, variant, control, model, sep = "_")
+          roc_compare <- roc_objects[[key_compare]]
+          if (!is.null(roc_metadict) && !is.null(roc_compare)) {
+            test_result <- roc.test(roc_metadict, roc_compare, method = "delong", alternative = "greater")
+            pval = test_result$p.value
+            delong_results <- rbind(delong_results, data.frame(
+              ComparedWith = "MetaDICT",
+              ComparedTo = method_name,
+              Variant = variant,
+              Control = control,
+              Model = model,
+              P_Value = pval,
+              Significance = as.numeric(pval<0.1)
+            ))
+          }
+        }
+      }
+      }
+      }else{
+        variant == "without"
+        for (model in models) {
+          for (method_name in names(batch_corrected)) {
+            key_compare <- paste(method_name, variant, control, model, sep = "_")
+            roc_compare <- roc_objects[[key_compare]]
+            if (!is.null(roc_objects_random$Object) && !is.null(roc_compare)) {
+              test_result <- roc.test(roc_objects_random$Object, roc_compare, method = "delong", alternative = "less")
+              pval = test_result$p.value
+          
+              delong_results <- rbind(delong_results, data.frame(
+                ComparedWith = "Random Classifier",
+                ComparedTo = method_name,
+                Variant = variant,
+                Control = control,
+                Model = model,
+                P_Value = test_result$p.value,
+                Significance = as.numeric(pval<0.1)
+              ))
+            }
+          }
+        }
+      }
+    }
   print(iter)
 }
-pred1 <- as.data.frame(table)
-colnames(pred1) <- c("Accuracy","Algorithm","Type","Method","Covariate","Signal")
 
-write.csv(pred1,file = "../result/pred_sim1_balanced.csv")
+write.csv(table,file = "../result/pred_sim1_balanced.csv")
+write.csv(delong_results, file = "../result/delong_sim1_balanced.csv")
+
 ```
 
 ## integrated prediction
 
 ```{r}
-table <- c()
+table <- data.frame()
+roc_objects <- list()
+delong_results <- data.frame()
+controls <- c("Sample", "Negative Control")
+models <- c("Random Forest", "K-NN")
+
+
+
 for(iter in 1:500){
   load(paste0("../data/Simulation_data/fig5ef/rdata/rdata_iter",iter,".RData"))
   
@@ -298,6 +343,8 @@ for(iter in 1:500){
   
   batch_corrected <- lapply(methods, function(f) list(with = f(O, meta), without = f(O, meta1)))
   batch_corrected$MetaDICT <- list(with = X, without = X1)
+  batch_corrected$Unprocessed <- list(with = O, without = O)
+
   
   res.debiasm1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_1.csv"),row.names = 1)
   res.debiasm2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_debiasm/debias_iter",iter,"_2.csv"),row.names = 1)
@@ -306,53 +353,80 @@ for(iter in 1:500){
   res.scanvi1 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_1.csv"),row.names = 1)
   res.scanvi2 <- read.csv(paste0("../data/Simulation_data/fig5ef/res_scanvi/scanvi_iter",iter,"_2.csv"),row.names = 1)
   batch_corrected$scANVI <- list(with = t(res.scanvi1), without = t(res.scanvi2))
- 
   
-  controls <- c("Sample", "Negative Control")
+  # random classifier
+  roc_objects_random <- random_pred(Y_f_split$test)
+
   
-  # Add predictions for all methods and control cases
-  for (method_name in names(batch_corrected)) {
+ # Add predictions
+   for (method_name in names(batch_corrected)) {
     for (variant in c("with", "without")) {
       for (control in controls) {
         label_set <- if (control == "Sample") Y_split else Y_f_split
-        table <- update_table(
-          table, "Random Forest", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
-          label_set, method_name, variant, control, ez
-        )
+        for (model in models) {
+          res <- update_table(table, model, train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+                              label_set, method_name, variant, control, roc_objects)
+          table <- res$table
+          roc_objects <- res$roc_list
+        }
       }
     }
-  }
-  
-  # Add K-NN predictions
-  for (method_name in names(batch_corrected)) {
-    for (variant in c("with", "without")) {
-      for (control in controls) {
-        label_set <- if (control == "Sample") Y_split else Y_f_split
-        table <- update_table(
-          table, "K-NN", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
-          label_set, method_name, variant, control, ez
-        )
-      }
-    }
-  }
-  
-  # Add predictions for the unprocessed data
+   }
+  # DeLong’s test between MetaDICT and other methods
+  methods_to_compare <- setdiff(names(batch_corrected), "MetaDICT")
   for (control in controls) {
-    label_set <- if (control == "Sample") Y_split else Y_f_split
-    table <- update_table(
-      table, "Random Forest", train_test_split(O, split.ind),
-      label_set, "Unprocessed", "with", control, ez
-    )
-    table <- update_table(
-      table, "K-NN", train_test_split(O, split.ind),
-      label_set, "Unprocessed", "with", control, ez
-    )
-  }
+    if (control == "Sample"){
+      for (variant in c("with", "without")) {
+      for (model in models) {
+        key_metadict <- paste("MetaDICT", variant, control, model, sep = "_")
+        roc_metadict <- roc_objects[[key_metadict]]
+        for (method_name in methods_to_compare) {
+          key_compare <- paste(method_name, variant, control, model, sep = "_")
+          roc_compare <- roc_objects[[key_compare]]
+          if (!is.null(roc_metadict) && !is.null(roc_compare)) {
+            test_result <- roc.test(roc_metadict, roc_compare, method = "delong", alternative = "greater")
+            pval = test_result$p.value
+            delong_results <- rbind(delong_results, data.frame(
+              ComparedWith = "MetaDICT",
+              ComparedTo = method_name,
+              Variant = variant,
+              Control = control,
+              Model = model,
+              P_Value = pval,
+              Significance = as.numeric(pval<0.1)
+            ))
+          }
+        }
+      }
+      }
+      }else{
+        variant == "without"
+        for (model in models) {
+          for (method_name in names(batch_corrected)) {
+            key_compare <- paste(method_name, variant, control, model, sep = "_")
+            roc_compare <- roc_objects[[key_compare]]
+            if (!is.null(roc_objects_random$Object) && !is.null(roc_compare)) {
+              test_result <- roc.test(roc_objects_random$Object, roc_compare, method = "delong", alternative = "less")
+              pval = test_result$p.value
+          
+              delong_results <- rbind(delong_results, data.frame(
+                ComparedWith = "Random Classifier",
+                ComparedTo = method_name,
+                Variant = variant,
+                Control = control,
+                Model = model,
+                P_Value = test_result$p.value,
+                Significance = as.numeric(pval<0.1)
+              ))
+            }
+          }
+        }
+      }
+    }
   print(iter)
 }
-pred <- as.data.frame(table)
-colnames(pred) <- c("Accuracy","Algorithm","Type","Method","Covariate","Signal")
-write.csv(pred, file = "../result/pred_sim1.csv")
+write.csv(table,file = "../result/pred_sim1.csv")
+write.csv(delong_results, file = "../result/delong_sim1.csv")
 ```
 
 # experiment when condition is confounded with batches
@@ -382,7 +456,12 @@ for(iter in 1:500){
 ```
 
 ```{r, warning=F}
-table <- c()
+table <- data.frame()
+roc_objects <- list()
+delong_results <- data.frame()
+controls <- c("Sample")
+models <- c("Random Forest", "K-NN")
+
 for(iter in 1:500){
   load(paste0("../data/Simulation_data/fig5d/rdata/rdata_iter",iter,".RData"))
   
@@ -408,6 +487,7 @@ for(iter in 1:500){
   
   
   batch_corrected <- lapply(methods, function(f) list(with = f(O, meta), without = f(O, meta1)))
+  batch_corrected$Unprocessed <- list(with = O, without = O)
   batch_corrected$MetaDICT <- list(with = X, without = X1)
   batch_corrected$PLSDA <- list(with = res.plsda, without = res.plsda1)
   
@@ -420,51 +500,75 @@ for(iter in 1:500){
   batch_corrected$scANVI <- list(with = t(res.scanvi1), without = t(res.scanvi2))
  
   
-  controls <- c("Sample")
-  
-  # Add predictions for all methods and control cases
-  for (method_name in names(batch_corrected)) {
+  # Add predictions
+   for (method_name in names(batch_corrected)) {
     for (variant in c("with", "without")) {
       for (control in controls) {
         label_set <- if (control == "Sample") Y_split else Y_f_split
-        table <- update_table(
-          table, "Random Forest", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
-          label_set, method_name, variant, control, ez
-        )
+        for (model in models) {
+          res <- update_table(table, model, train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
+                              label_set, method_name, variant, control, roc_objects)
+          table <- res$table
+          roc_objects <- res$roc_list
+        }
       }
     }
-  }
-  
-  # Add K-NN predictions
-  for (method_name in names(batch_corrected)) {
-    for (variant in c("with", "without")) {
-      for (control in controls) {
-        label_set <- if (control == "Sample") Y_split else Y_f_split
-        table <- update_table(
-          table, "K-NN", train_test_split(batch_corrected[[method_name]][[variant]], split.ind),
-          label_set, method_name, variant, control, ez
-        )
-      }
-    }
-  }
-  
-  # Add predictions for the unprocessed data
+   }
+  # DeLong’s test between MetaDICT and other methods
+  methods_to_compare <- setdiff(names(batch_corrected), "MetaDICT")
+
   for (control in controls) {
-    label_set <- if (control == "Sample") Y_split else Y_f_split
-    table <- update_table(
-      table, "Random Forest", train_test_split(O, split.ind),
-      label_set, "Unprocessed", "with", control, ez
-    )
-    table <- update_table(
-      table, "K-NN", train_test_split(O, split.ind),
-      label_set, "Unprocessed", "with", control, ez
-    )
-  }
+    if (control == "Sample"){
+      for (variant in c("with", "without")) {
+      for (model in models) {
+        key_metadict <- paste("MetaDICT", variant, control, model, sep = "_")
+        roc_metadict <- roc_objects[[key_metadict]]
+        for (method_name in methods_to_compare) {
+          key_compare <- paste(method_name, variant, control, model, sep = "_")
+          roc_compare <- roc_objects[[key_compare]]
+          if (!is.null(roc_metadict) && !is.null(roc_compare)) {
+            test_result <- roc.test(roc_metadict, roc_compare, method = "delong", alternative = "greater")
+            pval = test_result$p.value
+            delong_results <- rbind(delong_results, data.frame(
+              ComparedWith = "MetaDICT",
+              ComparedTo = method_name,
+              Variant = variant,
+              Control = control,
+              Model = model,
+              P_Value = pval,
+              Significance = as.numeric(pval<0.1)
+            ))
+          }
+        }
+      }
+      }
+      }else{
+        variant == "without"
+        for (model in models) {
+          for (method_name in names(batch_corrected)) {
+            key_compare <- paste(method_name, variant, control, model, sep = "_")
+            roc_compare <- roc_objects[[key_compare]]
+            if (!is.null(roc_objects_random$Object) && !is.null(roc_compare)) {
+              test_result <- roc.test(roc_objects_random$Object, roc_compare, method = "delong", alternative = "less")
+              pval = test_result$p.value
+          
+              delong_results <- rbind(delong_results, data.frame(
+                ComparedWith = "Random Classifier",
+                ComparedTo = method_name,
+                Variant = variant,
+                Control = control,
+                Model = model,
+                P_Value = test_result$p.value,
+                Significance = as.numeric(pval<0.1)
+              ))
+            }
+          }
+        }
+      }
+    }
   print(iter)
 }
 
-pred2 <- as.data.frame(table)
-colnames(pred2) <- c("Accuracy","Algorithm","Type","Method","Covariate","Signal")
-
-write.csv(pred2, "../result/pred_sim2_unblanced.csv")
+write.csv(table,file = "../result/pred_sim2_unbalanced.csv")
+write.csv(delong_results, file = "../result/delong_sim2_unbalanced.csv")
 ```

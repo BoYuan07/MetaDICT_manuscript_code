@@ -23,6 +23,8 @@ library(vegan)
 library(igraph)
 library(tidygraph)
 library(ggforce)
+library(SIAMCAT)
+library(tibble)
 ```
 
 
@@ -165,7 +167,6 @@ write.csv(meta_sub,paste0("../data/Rawdata_Wirbel/meta.csv"))
 # data integration
 
 ```{r}
-# Define the studies to include
 include_study <- c("FR", "DE", "CN", "US", "AT")
 
 # Create a list of sample IDs for each study
@@ -322,7 +323,7 @@ colnames(res_metadict) <- colnames(count.genus)
 ```
 
 ```{r, warning=F}
-## other methods
+# Other methods
 res_ComBatSeq <- sva::ComBat_seq(as.matrix(count.genus), meta_sub$Study, covar_mod = as.data.frame(meta_sub1))
 ```
 
@@ -336,6 +337,7 @@ res_mmuphin <- adjust_batch(
     data = meta_sub
   )$feature_abd_adj
 ```
+
 ```{r, warning=F}
 tax_tab <- t(count.genus)
 batchid <- factor(meta_sub$Study,levels = unique(meta_sub$Study), labels = 1:5)
@@ -347,7 +349,7 @@ O_ref <- t(count.genus)/colSums(count.genus)
 O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
 colnames(O_ref) <- rownames(count.genus)
 rownames(O_ref) <- colnames(count.genus)
-res_percentile <- t(percentile_norm(O_ref, meta_sub$Study, meta_sub$Group, "CRC"))
+res_percentile <- t(percentile_norm(O_ref, meta_sub$Study, meta_sub$Group, "Control"))
 
 O.clr <- microbiome::transform(count.genus, "clr")
 res_plsda <- t(PLSDA_batch(t(O.clr), Y.trt = meta_sub$Group, Y.bat = meta_sub$Study)$X.nobatch)
@@ -388,7 +390,6 @@ ylab("Count")
 ```
 
 ```{r}
-# S10 a
 ggarrange(p_age,p_bmi,p_gender,p_crc,nrow=1)
 ggsave("../fig/rd_batch_cov.jpeg", dpi=300, units="in", width=17, height=3)
 ```
@@ -415,7 +416,6 @@ p_gender_crc <- ggplot(meta_sub,aes(x = Group, group = Gender))+
   theme_bw()+
 ylab("Count")
 
-# S10 b
 ggarrange(p_age_crc,p_bmi_crc,p_gender_crc,nrow=1)
 ggsave("../fig/rd_crc_cov.jpeg", dpi=300, units="in", width=15, height=3)
 ```
@@ -468,7 +468,6 @@ gg$variable <- factor(gg$variable,levels=c("Unprocessed","MetaDICT", "ComBatSeq"
 ```
 
 ```{r}
-# fig 6a
 p <- ggplot(gg, aes(x = variable, y = ID, fill = R2, label = percent(R2, accuracy = 0.01))) +
   geom_tile() +
   geom_text(color = "black", na.rm = TRUE, face = "bold") +
@@ -547,7 +546,6 @@ function_group <- taxa_groups(cluster.res)
 ```
 
 ```{r}
-# Assuming D is your matrix
 singular_values <- svd(D)$d
 data <- data.frame(Index = seq_along(singular_values), SingularValue = singular_values)
 
@@ -609,10 +607,8 @@ color_list = c(
 # Set seed for reproducibility
 set.seed(2015)
 
-# Convert your igraph object (res$graph) to a tbl_graph object
 tbl_graph_obj <- as_tbl_graph(res$graph)
 
-# Ensure nodes have a 'cluster' attribute and compute node sizes based on degree
 tbl_graph_obj <- tbl_graph_obj %>%
   activate(nodes) %>%
   mutate(
@@ -638,26 +634,18 @@ circle_data <- layout_df %>%
 set.seed(2015)
 # Create the network plot with ggraph
 p <- ggraph(tbl_graph_obj, layout = "fr") +
-  # Draw edges with slight curvature and semi-transparent dark gray color
   geom_edge_link(color = adjustcolor("Gray", alpha.f = 0.5),
                  width = 0.5, curvature = 0.8) +
-  # Draw nodes, coloring them by cluster and sizing them by the computed size (no legend)
   geom_node_point(aes(color = cluster, size = size,), show.legend = TRUE, alpha = 0.7) +
-  # Conditionally label nodes only for communities 1, 2, and 9
   geom_node_text(aes(label = ifelse(cluster %in% c("1", "2", "9"), name, "")),
                  family = "Georgia", repel = TRUE, size = 4, color = "black", fontface = "bold") +
-  # Add dashed circles for communities 1, 2, and 9 using the computed circle_data
   geom_circle(data = circle_data, aes(x0 = center_x, y0 = center_y, r =  radius, color = cluster),
             inherit.aes = FALSE,  linetype = "dashed", size = 0.5) +
-  # Apply your manual color scale (adjust as needed for your color_list)
   scale_color_manual(
     name = "Microbial Community",
     values = color_list[1:length(unique(cluster.res))]
   ) +
-  # Use identity scaling for node sizes since they’re pre-computed
   scale_size_identity() +
-
-  # Use a minimal theme to keep the plot clean
   theme_minimal() +
   theme(
     panel.grid = element_blank(),
@@ -670,17 +658,14 @@ p <- ggraph(tbl_graph_obj, layout = "fr") +
     legend.text = element_text(size = 12),
     legend.position = "right"
   ) 
-# Save the plot as a high-resolution JPEG file
 ggsave("../fig/rd_taxa_community_ggplot.jpeg",
        plot = p, width = 13, height = 11, units = "in", dpi = 500)
 ```
 
 
 ```{r}
-# Create a data frame with genus names
 genus.name <- data.frame(Genus = rownames(count.genus), stringsAsFactors = FALSE)
 
-# Map taxonomic information using the all_taxonomy lookup
 genus.name$Family <- sapply(genus.name$Genus, function(i) {
   all_taxonomy$Family[str_detect(all_taxonomy$Genus, i)][1]
 })
@@ -697,20 +682,17 @@ genus.name$Phylum <- sapply(genus.name$Genus, function(i) {
 # Assign clustering results
 genus.name$cluster <- cluster.res
 
-# Function to extract the second word from a string
 extract_second_word <- function(x) {
   parts <- stringr::str_split(x, " ")[[1]]
   if (length(parts) >= 2) parts[2] else NA
 }
 
-# Update Class and Phylum by extracting the second word
 genus.name$Class <- sapply(genus.name$Class, extract_second_word)
 genus.name$Class[is.na(genus.name$Class)] <- "Unknown"
 
 genus.name$Phylum <- sapply(genus.name$Phylum, extract_second_word)
 genus.name$Phylum[is.na(genus.name$Phylum)] <- "Unknown"
 
-# Group less common phyla under "Others"
 common_phyla <- c("Firmicutes", "Proteobacteria", "Actinobacteria", 
                   "Bacteroidetes", "Fusobacteria", "Chloroflexi")
 genus.name$Phylum[!genus.name$Phylum %in% common_phyla] <- "Others"
@@ -755,49 +737,38 @@ diff.status.metadict[diff.metadict == T & logfold.metadict<0] <- rep("More Abund
 # Set seed for reproducibility
 set.seed(2015)
 
-# Define a shorter color list (one color for each differential status)
 color_list <- c("grey", "green4", "#E31A1C")
 
-# Define the order of the differential status labels (adjust as needed)
 order_list <- unique(diff.status.metadict)
 
-# Convert your igraph object (res$graph) to a tbl_graph object
 tbl_graph_obj <- as_tbl_graph(res$graph)
 
-# Ensure nodes have a 'cluster' attribute, compute node sizes based on degree,
-# and add the differential status as a node attribute
+
 tbl_graph_obj <- tbl_graph_obj %>%
   activate(nodes) %>%
   mutate(
-    cluster = as.factor(cluster.res),                              # Convert cluster.res to factor
-    size = scales::rescale(log(degree(.)), to = c(5, 14)),           # Adjust node sizes
-    name = rownames(count.genus),                                  # Set node names
-    diff_status = factor(diff.status.metadict, levels = order_list)  # Add differential status as a factor
+    cluster = as.factor(cluster.res),                              
+    size = scales::rescale(log(degree(.)), to = c(5, 14)),          
+    name = rownames(count.genus),                                  
+    diff_status = factor(diff.status.metadict, levels = order_list)  
   )
 
 set.seed(2015)
-# Create the network plot with ggraph
 p <- ggraph(tbl_graph_obj, layout = "fr") +
-  # Draw edges with slight curvature and semi-transparent gray color
   geom_edge_link(
     color = adjustcolor("Gray", alpha.f = 0.5),
     width = 0.5, curvature = 0.8
   ) +
-  # Map node color to the diff_status variable and size to the pre-computed size
   geom_node_point(aes(color = diff_status, size = size), alpha = 0.6) +
-  # Conditionally label nodes for differentially abundant taxa (i.e., not "Not Differentially Abundant")
   geom_node_text(
     aes(label = ifelse(diff_status != "Not Differentially Abundant", name, "")),
     family = "Georgia", repel = TRUE, size = 4, color = "black",fontface = "bold"
   ) +
-  # Apply a manual color scale for the differential status (legend will be shown)
   scale_color_manual(
     name = "Differential Abundance",
     values = color_list
   ) +
-  # Use identity scaling for node sizes since they're pre-computed
   scale_size_identity() +
-  # Use a minimal theme to keep the plot clean
   theme_minimal() +
   theme(
     panel.grid = element_blank(),
@@ -823,10 +794,8 @@ outputs <- lapply(seq_along(O.list), function(i) {
         alpha = alpha)
 })
 
-# Extract adjusted p-values for GroupCRC from each output
+# Extract results for GroupCRC from each output
 p_anc <- lapply(outputs, function(out) out$output$GroupCRC$padj)
-
-# Extract rejection decisions for GroupCTR from each output
 diff_anc <- lapply(outputs, function(out) out$output$GroupCTR$reject)
 
 # Name the outputs corresponding to each study
@@ -846,7 +815,6 @@ pval1 <- data.frame(
   stringsAsFactors = FALSE
 )
 
-# Subset rows where at least one p-value (columns 2 to 7) is below alpha
 pval <- pval1[rowSums(pval1[, 2:7] < alpha) > 0, ]
 
 # Order the resulting data frame by the MetaDICT p-values
@@ -854,9 +822,6 @@ pval <- pval[order(pval$MetaDICT), ]
 ```
 
 ```{r}
-# S13: Visualization of Adjusted p-values
-
-# Reshape the p-value data frame from wide to long format
 gg1 <- melt(pval, id.vars = "genus")
 gg1$qval <- as.numeric(gg1$value)
 
@@ -899,175 +864,231 @@ seeds[[6]] <- sample.int(n=1000, 1)
 ```
 
 ```{r}
-RF_pred <- function(train,test,trainy,testy){
-  control <- trainControl(method = "cv",          # Cross-validation
-                          number = 5,             # Number of folds
-                          summaryFunction = twoClassSummary,  # For ROC
-                          classProbs = TRUE,
-                          seeds = seeds)       # Enable probabilities for ROC
-  dataset <- data.frame(trainy,t(train))
-  rf <- train(trainy~., data=dataset, 
-                  method="rf", 
-                  metric='ROC',
-                  trControl=control,
-                  ntree = 500)
-    test_pred <- predict(rf, newdata = t(test))
-  actual <- testy
-  roc_object <- roc(actual,as.numeric(test_pred))
-  return(auc(roc_object))
+RF_pred <- function(train, test, trainy, testy, label = "CRC", cv_num = 5) {
+  
+  dataset <- data.frame(trainy, t(train))
+  
+  control <- trainControl(
+    method = "cv",
+    number = cv_num,
+    summaryFunction = twoClassSummary,
+    classProbs = TRUE,
+    seeds = seeds
+  )
+
+  # Train random forest model
+  rf <- train(
+    trainy ~ ., data = dataset,
+    method = "rf",
+    metric = "ROC",
+    trControl = control,
+    ntree = 500
+  )
+
+  # Predict probabilities on the test set
+  test_probs <- predict(rf, newdata = t(test), type = "prob")
+
+  # Extract probability for the positive class
+  positive_probs <- test_probs[[label]]
+
+  # Compute ROC
+  roc_object <- roc(response = testy, predictor = positive_probs, direction = "<")
+
+  return(roc_object)
 }
 ```
 
 ```{r}
-predict_task <- function(data, batchid, group, method) {
-  # Identify unique batches/studies
+# CRC labels for each dataset
+include_study <- unique(meta_sub$Study)
+nbatch <- length(include_study)
+y.list <- vector("list", length(include_study))
+Y = factor(meta_sub$Group, levels = c("Control","CRC"))
+for(i in seq_len(nbatch)){
+  idx <- which(meta_sub$Study == include_study[i])
+  y.list[[i]] <- Y[idx]
+}
+```
+
+```{r}
+# Helper function to extract count for each dataset
+seperate_data = function(data, batchid){
   include_study <- unique(batchid)
   nbatch <- length(include_study)
-  
-  # Initialize lists to store data and group labels for each batch
   data.list <- vector("list", nbatch)
-  y.list <- vector("list", nbatch)
-  
   for (i in seq_len(nbatch)) {
     idx <- which(batchid == include_study[i])
     data.list[[i]] <- data[, idx]
-    y.list[[i]] <- group[idx]
   }
-  
-  # Initialize vectors to accumulate prediction results and corresponding metadata
-  pred_res <- numeric()
-  train <- character()
-  test <- character()
-  type <- character()
-  
-  # Cross-prediction between all pairs of batches
-  for (i in seq_len(nbatch)) {
-    for (j in seq_len(nbatch)) {
-      auc <- RF_pred(
-        data.list[[i]], data.list[[j]], 
-        as.factor(y.list[[i]]), as.factor(y.list[[j]])
-      )
-      pred_res <- c(pred_res, auc)
-      train <- c(train, include_study[i])
-      test <- c(test, include_study[j])
-      type <- c(type, method)
-    }
-  }
-  
-  # Integrated data prediction:
-  # Use samples from all batches except the current one as training data
-  for (j in seq_len(nbatch)) {
-    idx <- which(batchid != include_study[j])
-    auc <- RF_pred(
-      data[, idx], data.list[[j]],
-      as.factor(group[idx]), as.factor(y.list[[j]])
-    )
-    pred_res <- c(pred_res, auc)
-    train <- c(train, "LOSO")
-    test <- c(test, include_study[j])
-    type <- c(type, method)
-  }
-  
-  # Combine results into a data frame
-  pred_ac_res <- data.frame(
-    AUCROC = pred_res,
-    Train = train,
-    Test = test,
-    Type = type,
-    stringsAsFactors = FALSE
-  )
-  
-  return(pred_ac_res)
+  return(data.list)
 }
+```
 
+```{r}
+metadict_list <- seperate_data(res_metadict, meta_sub$Study)
+unprocessed_list <- seperate_data(count.genus, meta_sub$Study)
+conqur_list <- seperate_data(res_ConQuR, meta_sub$Study)
+combatseq_list <- seperate_data(res_ComBatSeq, meta_sub$Study)
+debiasm_list <- seperate_data(res_debiasm, meta_sub$Study)
+mmuphin_list <- seperate_data(res_mmuphin, meta_sub$Study)
+scanvi_list <- seperate_data(res_scanvi, meta_sub$Study)
+percentle_list <- seperate_data(res_percentile, meta_sub$Study)
+plsda_list <- seperate_data(res_plsda, meta_sub$Study)
+```
+
+```{r}
+other_method = c("Unprocessed","ConQuR", "ComBatSeq", "MMUPHin",  "Percentile-Norm", "PLSDA-batch", "DEBIAS-M", "scANVI")
+otherdata_list = list(unprocessed_list, conqur_list, combatseq_list, mmuphin_list, percentle_list, plsda_list, debiasm_list, scanvi_list)
+integrated_list = list(count.genus, res_ConQuR, res_ComBatSeq, res_mmuphin, res_percentile, res_plsda, res_debiasm, res_scanvi)
+```
+
+# Random forest prediction 
+
+```{r}
+# Initialize dataframes
+auc_res <- data.frame(auc = numeric(), method = character(), train = character(), test = character())
+delong_metadict <- data.frame(pval = numeric(), stat = numeric(), method1 = character(), method2 = character(), train = character(), test = character())
 ```
 
 ```{r}
 set.seed(2025)
-pred_unprocessed <- predict_task(count.genus, meta_sub$Study, meta_sub$Group, "Unprocessed")
-pred_metadict <- predict_task(res_metadict, meta_sub$Study, meta_sub$Group, "MetaDICT")
-pred_combatseq <- predict_task(res_ComBatSeq, meta_sub$Study, meta_sub$Group, "ComBatSeq")
-pred_mmuphin <- predict_task(res_mmuphin, meta_sub$Study, meta_sub$Group, "MMUPHin")
-pred_conqur <- predict_task(res_ConQuR, meta_sub$Study, meta_sub$Group, "ConQuR")
-pred_plsda <- predict_task(res_plsda, meta_sub$Study, meta_sub$Group, "PLSDA-batch")
-pred_percentile <- predict_task(res_percentile, meta_sub$Study, meta_sub$Group, "Percentile-Norm")
-pred_scanvi <- predict_task(res_scanvi, meta_sub$Study, meta_sub$Group, "scANVI")
-pred_debiasm <- predict_task(res_debiasm, meta_sub$Study, meta_sub$Group, "DEBIAS-M")
+# Cross-prediction between all pairs of batches
+for (i in seq_len(nbatch)) {
+  for (j in seq_len(nbatch)) {
+   metadict_res <- RF_pred(metadict_list[[i]], metadict_list[[j]], as.factor(y.list[[i]]), as.factor(y.list[[j]]))
+    auc_res <- rbind(auc_res, data.frame(auc = auc(metadict_res), 
+                     method = "MetaDICT", 
+                     train = include_study[i],
+                     test = include_study[j]))
+    for (k in 1:length(other_method)) {
+      other_res <- RF_pred(otherdata_list[[k]][[i]], otherdata_list[[k]][[j]], as.factor(y.list[[i]]), as.factor(y.list[[j]]))
+      auc_res <- rbind(auc_res, data.frame(auc = auc(other_res), 
+                     method = other_method[k], 
+                     train = include_study[i],
+                     test = include_study[j]))
+      delong_metadict_ind <- roc.test(metadict_res, other_res, method = "delong")
+
+       delong_metadict <- rbind(delong_metadict, data.frame(
+        pval = delong_metadict_ind$p.value,
+        stat = delong_metadict_ind$statistic,
+        method1 = other_method[k],
+        method2 = "MetaDICT",
+        train = include_study[i],
+        test = include_study[j]
+      ))
+    }
+  }
+}
 ```
 
+
 ```{r}
-# Combine all prediction results into a single data frame
-pred_ac_res <- rbind(
-  pred_unprocessed,
-  pred_metadict,
-  pred_combatseq,
-  pred_mmuphin,
-  pred_conqur,
-  pred_plsda,
-  pred_percentile,
-  pred_scanvi,
-  pred_debiasm
-)
+# LOSO experiment
+set.seed(2025)
+for (j in seq_len(nbatch)) {
+    idx <- which(meta_sub$Study != include_study[j])
+    metadict_res <- RF_pred(res_metadict[,idx], metadict_list[[j]], as.factor(meta_sub$Group[idx]), as.factor(y.list[[j]]))
+    auc_res <- rbind(auc_res, data.frame(auc = auc(metadict_res), 
+                     method = "MetaDICT", 
+                     train = "LOSO",
+                     test = include_study[j]))
+    
+    for (k in 1:length(other_method)) {
+      other_res <- RF_pred(integrated_list[[k]][,idx], otherdata_list[[k]][[j]], as.factor(meta_sub$Group[idx]), as.factor(y.list[[j]]))
+      auc_res <- rbind(auc_res, data.frame(auc = auc(other_res), 
+                     method = other_method[k], 
+                     train = "LOSO",
+                     test = include_study[j]))
+      delong_metadict_ind <- roc.test(metadict_res, other_res, method = "delong")
+     
+       delong_metadict <- rbind(delong_metadict, data.frame(
+        pval = delong_metadict_ind$p.value,
+        stat = delong_metadict_ind$statistic,
+        method1 = other_method[k],
+        method2 = "MetaDICT",
+        train = "LOSO",
+        test = include_study[j]
+      ))
+  }
+}
+```
+
+
+```{r}
+pred_ac_res <- auc_res
 
 # Get unique methods and training set identifiers
-methods   <- unique(pred_ac_res$Type)
-train_set <- unique(pred_ac_res$Train)
+methods   <- unique(pred_ac_res$method)
+train_set <- unique(pred_ac_res$train)
 
+pred_ac_res$auc <- as.numeric(pred_ac_res$auc)
 # For each method, compute the average AUCROC for each training set 
 # (excluding self-predictions) and append the results
 for (m in methods) {
   avg_values <- sapply(train_set, function(tr) {
-    mean(pred_ac_res$AUCROC[
-      pred_ac_res$Train == tr & 
-      pred_ac_res$Test != tr & 
-      pred_ac_res$Type == m
+    mean(pred_ac_res$auc[
+      pred_ac_res$train == tr & 
+      pred_ac_res$test != tr & 
+      pred_ac_res$method == m
     ])
   })
   
   avg_df <- data.frame(
-    AUCROC = avg_values,
-    Train  = train_set,
-    Type   = m,
-    Test   = "Average",
-    stringsAsFactors = FALSE
+    auc = avg_values,
+    train  = train_set,
+    method   = m,
+    test   = "Average"
   )
   
   pred_ac_res <- rbind(pred_ac_res, avg_df)
 }
 
 # Set AUCROC values to NA for self-predictions (where Train equals Test)
-pred_ac_res$AUCROC[pred_ac_res$Train == pred_ac_res$Test] <- NA
+pred_ac_res$auc[pred_ac_res$train == pred_ac_res$test] <- NA
 
 # Initialize the Fill column
-pred_ac_res$Fill <- "same"
+pred_ac_res$fill <- "same"
 
 # Compare each method's AUCROC to MetaDICT and assign Fill labels accordingly
 for (m in methods) {
   if (m != "MetaDICT") {
+    print(m)
     # Extract MetaDICT's AUCROC values and the current method's values
-    auc_meta   <- pred_ac_res$AUCROC[pred_ac_res$Type == "MetaDICT"]
-    auc_method <- pred_ac_res$AUCROC[pred_ac_res$Type == m]
-    
+    auc_meta   <- pred_ac_res$auc[pred_ac_res$method == "MetaDICT"]
+    auc_method <- pred_ac_res$auc[pred_ac_res$method == m]
+  
     # Calculate the difference: MetaDICT - current method
     diff <- auc_meta - auc_method
     
     # Print the proportion where MetaDICT outperforms the current method
     print(mean(diff[!is.na(diff)] > 0))
     
-    # Identify the indices corresponding to the current method
-    idx <- which(pred_ac_res$Type == m)
+    idx <- which(pred_ac_res$method == m)
     
-    # Note: The following assignment assumes that the ordering in 'diff' 
-    # aligns with the ordering of pred_ac_res rows for the current method.
-    pred_ac_res$Fill[idx][which(diff > 0)] <- "high"
-    pred_ac_res$Fill[idx][which(diff < 0)] <- "low"
-    pred_ac_res$Fill[idx][which(diff == 0)] <- "same"
+    pred_ac_res$fill[idx][which(diff > 0)] <- "high"
+    pred_ac_res$fill[idx][which(diff < 0)] <- "low"
+    pred_ac_res$fill[idx][which(diff == 0)] <- "same"
   }
 }
 ```
 
 ```{r}
-write.csv(pred_ac_res,"../result/realdata_rf1.csv")
+write.csv(pred_ac_res,"../result/realdata_rf_crc.csv")
+```
+
+```{r}
+delong_metadict$fill = "p-value>0.1, MetaDICT has higher ROC-AUC"
+delong_metadict$fill[which(delong_metadict$pval<=0.1 & delong_metadict$stat>0)] = "p-value<0.1, MetaDICT has higher ROC-AUC"
+delong_metadict$fill[which(delong_metadict$pval>0.1 & delong_metadict$stat<0)] = "p-value>0.1, MetaDICT has lower ROC-AUC"
+delong_metadict$fill[which(delong_metadict$pval<=0.1 & delong_metadict$stat<0)] = "p-value<0.1, MetaDICT has lower ROC-AUC"
+delong_metadict$pval[which(as.character(delong_metadict$train)==as.character(delong_metadict$test))] = NA
+
+delong_metadict$significance = ""
+delong_metadict$significance[delong_metadict$pval<=0.1] = "*"
+delong_metadict$significance[delong_metadict$pval<=0.01] = "**"
+delong_metadict$significance[delong_metadict$pval<=0.001] = "***"
+
+write.csv(delong_metadict,"../result/realdata_delong_metadict_crc.csv")
 ```
 
 
@@ -1077,14 +1098,15 @@ write.csv(pred_ac_res,"../result/realdata_rf1.csv")
 set.seed(2025)
 meta.list.nc <- list()
 for(i in 1:length(O.list)){
-  meta.list.nc[[i]] <- data.frame("Y" = paste("Group",rbinom(ncol(O.list[[i]]),1,0.5)))
+  meta.list.nc[[i]] <- data.frame("Y" = paste0("Group",rbinom(ncol(O.list[[i]]),1,0.5)))
 }
 meta.nc = do.call("rbind",meta.list.nc)
+meta.nc$Y = as.factor(meta.nc$Y)
 ```
 
 
 ```{r}
-# MetaDICT normalization using non-contaminated data
+# MetaDICT
 metadict.res.nc <- metadict(
   O.list, alpha, beta, gamma, dist.genus, meta.list.nc, trace = 3
 )
@@ -1125,7 +1147,7 @@ O_ref <- t(count.genus) / colSums(count.genus)
 O_ref[O_ref == 0] <- runif(sum(O_ref == 0), 0, 1e-6)
 colnames(O_ref) <- rownames(count.genus)
 rownames(O_ref) <- colnames(count.genus)
-res_percentile.nc <- t(percentile_norm(O_ref, meta.nc$Study, meta.nc$Y, "Group 1"))
+res_percentile.nc <- t(percentile_norm(O_ref, meta.nc$Study, meta.nc$Y, "Group1"))
 
 # PLSDA batch correction after CLR transformation
 O.clr <- microbiome::transform(count.genus, "clr")
@@ -1144,86 +1166,534 @@ colnames(res_metadict.nc) <- colnames(count.genus)
 ```
 
 ```{r}
-set.seed(2025)
-meta.nc$Y <- factor(meta.nc$Y,labels = c("G1","G2"))
-pred_unprocessed <- predict_task(count.genus, meta_sub$Study, meta.nc$Y, "Unprocessed")
-pred_metadict <- predict_task(res_metadict.nc, meta_sub$Study, meta.nc$Y, "MetaDICT")
-pred_combatseq <- predict_task(res_ComBatSeq.nc, meta_sub$Study, meta.nc$Y, "ComBatSeq")
-pred_mmuphin <- predict_task(res_mmuphin.nc, meta_sub$Study, meta.nc$Y, "MMUPHin")
-pred_conqur <- predict_task(res_ConQuR.nc, meta_sub$Study, meta.nc$Y, "ConQuR")
-pred_plsda <- predict_task(res_plsda.nc, meta_sub$Study, meta.nc$Y, "PLSDA-batch")
-pred_percentile <- predict_task(res_percentile.nc, meta_sub$Study, meta.nc$Y, "Percentile-Norm")
-pred_scanvi <- predict_task(res_scanvi.nc, meta_sub$Study, meta.nc$Y, "scANVI")
-pred_debiasm <- predict_task(res_debiasm.nc, meta_sub$Study, meta.nc$Y, "DEBIAS-M")
+metadict_list.nc <- seperate_data(res_metadict.nc, meta.nc$Study)
+unprocessed_list.nc <- seperate_data(count.genus, meta.nc$Study)
+conqur_list.nc <- seperate_data(res_ConQuR.nc, meta.nc$Study)
+combatseq_list.nc <- seperate_data(res_ComBatSeq.nc, meta.nc$Study)
+debiasm_list.nc <- seperate_data(res_debiasm.nc, meta.nc$Study)
+mmuphin_list.nc <- seperate_data(res_mmuphin.nc, meta.nc$Study)
+scanvi_list.nc <- seperate_data(res_scanvi.nc, meta.nc$Study)
+percentle_list.nc <- seperate_data(res_percentile.nc, meta.nc$Study)
+plsda_list.nc <- seperate_data(res_plsda.nc, meta.nc$Study)
 ```
 
 ```{r}
-# Combine all prediction results into a single data frame
-pred_ac_res <- rbind(
-  pred_unprocessed,
-  pred_metadict,
-  pred_combatseq,
-  pred_mmuphin,
-  pred_conqur,
-  pred_plsda,
-  pred_percentile,
-  pred_scanvi,
-  pred_debiasm
-)
+other_method = c("Unprocessed","MetaDICT","ConQuR", "ComBatSeq", "MMUPHin",  "Percentile-Norm", "PLSDA-batch", "DEBIAS-M", "scANVI")
+otherdata_list.nc = list(unprocessed_list.nc,metadict_list.nc, conqur_list.nc, combatseq_list.nc, mmuphin_list.nc, percentle_list.nc, plsda_list.nc, debiasm_list.nc, scanvi_list.nc)
+integrated_list.nc = list(count.genus, res_metadict.nc, res_ConQuR.nc,  res_ComBatSeq.nc, res_mmuphin.nc, res_percentile.nc, res_plsda.nc, res_debiasm.nc, res_scanvi.nc)
+```
 
-# Get unique methods and training set identifiers
-methods   <- unique(pred_ac_res$Type)
-train_set <- unique(pred_ac_res$Train)
+```{r}
+# Initialize data frame
+auc_res_nc <- data.frame(auc = numeric(), method = character(), train = character(), test = character())
+delong_nc <- data.frame(pval = numeric(), stat = numeric(), method1 = character(), method2 = character(), train = character(), test = character())
+```
 
-# Loop over each method to compute the average AUCROC 
-# for each training set (excluding self-predictions)
+```{r}
+# NC label
+include_study <- unique(meta.nc$Study)
+nbatch <- length(include_study)
+y.list.nc <- vector("list", length(include_study))
+for(i in seq_len(nbatch)){
+  idx <- which(meta.nc$Study == include_study[i])
+  y.list.nc[[i]] <- meta.nc$Y[idx]
+}
+```
+
+```{r}
+random_pred <- function(testy) {
+  random_probs <- rep(0.5,length(testy))
+  roc_obj <- roc(response = testy, predictor = random_probs, direction = "<")
+  return(roc_obj)
+}
+```
+
+
+
+```{r}
+set.seed(2025)
+# Cross-prediction between all pairs of batches
+for (i in seq_len(nbatch)) {
+  for (j in seq_len(nbatch)) {
+    for (k in 1:length(other_method)) {
+       other_res <- RF_pred(otherdata_list.nc[[k]][[i]], otherdata_list.nc[[k]][[j]], as.factor(y.list.nc[[i]]), as.factor(y.list.nc[[j]]), "Group1")
+      auc_res_nc <- rbind(auc_res_nc, data.frame(auc = auc(other_res), 
+                     method = other_method[k], 
+                     train = include_study[i],
+                     test = include_study[j]))
+      
+      roc_objects_random <- random_pred(as.factor(y.list.nc[[j]]))
+      test_result <- roc.test(other_res, roc_objects_random, method = "delong", alternative = "greater")
+      delong_nc <- rbind(delong_nc, data.frame(
+                                pval = test_result$p.value,
+                                stat = test_result$statistic,
+                                method1 = "Random Classifier",
+                                method2 = other_method[k],
+                                train = include_study[i],
+                                test = include_study[j]
+                              ))
+    }
+  }
+}
+```
+
+
+```{r}
+# LOSO
+set.seed(2025)
+for (j in seq_len(nbatch)) {
+    idx <- which(meta.nc$Study != include_study[j])
+    for (k in 1:length(other_method)) {
+      other_res <- RF_pred(integrated_list.nc[[k]][,idx], otherdata_list.nc[[k]][[j]], as.factor(meta.nc$Y[idx]), as.factor(y.list.nc[[j]]),"Group1")
+      auc_res_nc <- rbind(auc_res_nc, data.frame(auc = auc(other_res), 
+                     method = other_method[k], 
+                     train = "LOSO",
+                     test = include_study[j]))
+      roc_objects_random <- random_pred(as.factor(y.list.nc[[j]]))
+      test_result <- roc.test(other_res, roc_objects_random, method = "delong", alternative = "greater")
+      delong_nc <- rbind(delong_nc, data.frame(
+                                pval = test_result$p.value,
+                                stat = test_result$statistic,
+                                method1 = "Random Classifier",
+                                method2 = other_method[k],
+                                train = "LOSO",
+                                test = include_study[j]
+                              ))
+    }
+  }
+```
+
+```{r}
+pred_ac_res_nc <- auc_res_nc
+methods   <- unique(pred_ac_res_nc$method)
+train_set <- unique(pred_ac_res_nc$train)
+
+pred_ac_res_nc$auc <- as.numeric(pred_ac_res_nc$auc)
+
+# For each method, compute the average AUCROC for each training set 
+# (excluding self-predictions) and append the results
 for (m in methods) {
   avg_values <- sapply(train_set, function(tr) {
-    mean(pred_ac_res$AUCROC[
-      pred_ac_res$Train == tr & 
-      pred_ac_res$Test != tr & 
-      pred_ac_res$Type == m
+    mean(pred_ac_res_nc$auc[
+      pred_ac_res_nc$train == tr & 
+      pred_ac_res_nc$test != tr & 
+      pred_ac_res_nc$method == m
     ])
   })
   
-  # Create a data frame with the average values for current method
   avg_df <- data.frame(
-    AUCROC = avg_values,
-    Train  = train_set,
-    Type   = rep(m, length(train_set)),
-    Test   = rep("Average", length(train_set)),
-    stringsAsFactors = FALSE
+    auc = avg_values,
+    train  = train_set,
+    method   = m,
+    test   = "Average"
   )
   
-  # Append the average results to the combined data frame
-  pred_ac_res <- rbind(pred_ac_res, avg_df)
+  pred_ac_res_nc <- rbind(pred_ac_res_nc, avg_df)
 }
 
-# Replace AUCROC values of 1 with NA
-pred_ac_res$AUCROC[pred_ac_res$AUCROC == 1] <- NA
+# Initialize the Fill column
+pred_ac_res_nc$fill <- "same"
+pred_ac_res_nc$auc[pred_ac_res_nc$train == pred_ac_res_nc$test] <- NA
 
-# Initialize a new column 'Fill' to store comparison labels
-pred_ac_res$Fill <- "same"
 
-# For each method, compare AUCROC to a baseline of 0.5 and assign Fill labels
+# Compare each method's AUCROC to 0.5 and assign Fill labels accordingly
 for (m in methods) {
-  # Identify rows corresponding to the current method
-  idx <- which(pred_ac_res$Type == m)
+ 
+  idx <- which(pred_ac_res_nc$method == m)
   
   # Compute the difference from 0.5
-  diff <- 0.5 - pred_ac_res$AUCROC[idx]
+  diff <- 0.5 - pred_ac_res_nc$auc[idx]
   
   # Optionally, print the proportion where the difference is positive
   print(mean(diff[!is.na(diff)] > 0))
   
   # Assign labels based on the sign of the difference
-  pred_ac_res$Fill[idx][diff > 0]  <- "high"
-  pred_ac_res$Fill[idx][diff < 0]  <- "low"
-  pred_ac_res$Fill[idx][diff == 0] <- "same"
+  pred_ac_res_nc$fill[idx][diff > 0]  <- "high"
+  pred_ac_res_nc$fill[idx][diff < 0]  <- "low"
+  pred_ac_res_nc$fill[idx][diff == 0] <- "same"
 }
 ```
 
 ```{r}
-write.csv(pred_ac_res,"../result/realdata_nc.csv")
+write.csv(pred_ac_res_nc,"../result/realdata_nc.csv")
+```
+
+```{r}
+delong_nc$fill = "p-value>0.1"
+delong_nc$fill[which(delong_nc$pval<=0.1)] = "p-value<0.1, the ROC-AUC of the classifier is significantly higher than a random classifier"
+
+delong_nc$pval[which(as.character(delong_nc$train)==as.character(delong_nc$test))] = NA
+
+delong_nc$significance = ""
+delong_nc$significance[delong_nc$pval<=0.1] = "*"
+delong_nc$significance[delong_nc$pval<=0.01] = "**"
+delong_nc$significance[delong_nc$pval<=0.001] = "***"
+
+write.csv(delong_nc,"../result/realdata_delong_nc_crc.csv")
+```
+
+# Species-level analysis
+
+## Random forest
+
+```{r}
+# check taxa without taxonomy information
+sum(!rownames(count)%in%taxonomy$taxa)
+sum(rowSums(count)==0)
+# filter out these taxa
+count_species = count[rownames(count)%in%taxonomy$taxa,]
+count_species = count_species[rowSums(count_species)!=0,]
+```
+
+```{r}
+# Prepare input for metadict
+metadict_meta = data.frame("Group" = meta$Group, "batch" = meta$Study)
+rownames(metadict_meta) = colnames(count_species)
+
+taxonomy_species = taxonomy[which(taxonomy$taxa%in%rownames(count_species)),c(1,4)]
+colnames(taxonomy_species) = c("Genus","Species")
+rownames(taxonomy_species) = taxonomy_species$Species
+
+all(rownames(taxonomy_species)==rownames(count_species))
+```
+
+```{r}
+library(MetaDICT)
+species_metadict_res = MetaDICT(count_species, metadict_meta, taxonomy = taxonomy_species, tax_level = "Species")
+metadict_species = species_metadict_res$count
+```
+
+```{r}
+# Rename species name for random forest
+rownames(metadict_species) = paste0("Taxon",seq_len(nrow(metadict_species)))
+metadict_list <- seperate_data(metadict_species, meta$Study)
+unprocessed_list <- seperate_data(count_species,meta$Study)
+```
+
+```{r}
+# CRC labels for each dataset
+include_study <- unique(meta$Study)
+nbatch <- length(include_study)
+y.list <- vector("list", length(include_study))
+Y = factor(meta$Group, levels = c("Control","CRC"))
+for(i in seq_len(nbatch)){
+  idx <- which(meta$Study == include_study[i])
+  y.list[[i]] <- Y[idx]
+  print(length(idx))
+}
+```
+
+```{r}
+# Initialize dataframes
+auc_res <- data.frame(auc = numeric(), method = character(), train = character(), test = character())
+```
+
+```{r}
+set.seed(2025)
+for (j in seq_len(nbatch)) {
+    idx <- which(meta$Study != include_study[j])
+    metadict_res <- RF_pred(metadict_species[,idx], metadict_list[[j]], as.factor(meta$Group[idx]), as.factor(y.list[[j]]), cv_num = 3)
+    auc_res <- rbind(auc_res, data.frame(auc = auc(metadict_res), 
+                     method = "MetaDICT", 
+                     train = "LOSO",
+                     test = include_study[j]))
+    unprocessed_res <- RF_pred(count_species[,idx], unprocessed_list[[j]], as.factor(meta$Group[idx]), as.factor(y.list[[j]]), cv_num = 3)
+    auc_res <- rbind(auc_res, data.frame(auc = auc(unprocessed_res), 
+                     method = "Unprocessed", 
+                     train = "LOSO",
+                     test = include_study[j]))
+   
+}
+
+pred_ac_res <- auc_res
+pred_ac_res$auc <- as.numeric(pred_ac_res$auc)
+methods <- unique(pred_ac_res$method)
+train_set <- unique(pred_ac_res$train)
+
+for (m in methods) {
+  avg_values <- sapply(train_set, function(tr) {
+    mean(pred_ac_res$auc[
+      pred_ac_res$train == tr & 
+      pred_ac_res$test != tr & 
+      pred_ac_res$method == m
+    ])
+})
+  
+  avg_df <- data.frame(
+    auc = avg_values,
+    train  = train_set,
+    method   = m,
+    test   = "Average"
+  )
+  pred_ac_res <- rbind(pred_ac_res, avg_df)
+}
+write.csv(pred_ac_res,file = "../result/realdata_rf_species_loso.csv")
+```
+
+## lasso regression model
+
+```{r}
+tss = function(X){
+  return(t(t(X)/colSums(X)))
+}
+```
+
+```{r}
+all(colnames(count) == meta$Sample_ID)
+```
+
+# redo analysis for unprocessed data 
+
+```{r}
+meta.crc <- meta %>%
+  filter(Study %in% include_study) %>%
+  filter(Group %in% c('Control', 'CRC'))
+
+# filtering
+feat.rel.crc <- tss(count)
+temp.max.ab <- t(sapply(row.names(feat.rel.crc),
+  FUN=function(marker){sapply(unique(meta.crc$Study),
+    FUN=function(study, marker){
+      max.ab = max(feat.rel.crc[marker, which(meta.crc$Study == study)])
+    },
+  marker=marker)}))
+
+f.idx <- rowSums(temp.max.ab >= 1e-03) >= 3 &
+  row.names(feat.rel.crc) != '-1'
+feat.rel.red <- feat.rel.crc[f.idx,]
+meta <- meta.crc
+feat.all <- feat.rel.red
+count_filter <- count[f.idx,]
+```
+
+```{r}
+train_and_evaluate_models <- function(meta, feat.all, method.name) {
+  models <- list()
+  ml.method <- 'LASSO'
+  include_study <- unique(meta$Study)
+  for (study in include_study){
+    # single study model
+    meta.train <- meta %>%
+      filter(Study == study)
+    feat.train <- feat.all[,meta.train %>% pull(Sample_ID)]
+    meta.train <- data.frame(meta.train)
+    rownames(meta.train) <- meta.train$Sample_ID
+
+    siamcat <- siamcat(feat=feat.train, meta=meta.train,
+                       label = 'Group', case='CRC')
+    siamcat <- normalize.features(siamcat, norm.method = 'log.std',
+                                norm.param = list(log.n0 = 1e-5, sd.min.q = 0.1, n.p = 2, norm.margin = 1), feature.type = 'original',
+                                verbose=3)
+    siamcat <- create.data.split(siamcat, num.folds = 10,
+                               num.resample = 10)
+    siamcat <- train.model(siamcat,
+                         method = 'lasso',
+                         measure = 'classif.auc',
+                         min.nonzero = 1,
+                         perform.fs = FALSE)
+    siamcat <- make.predictions(siamcat)
+    siamcat <- evaluate.predictions(siamcat)
+    models[[study]] <- siamcat
+
+    cat("Successfully trained a single study model for study", study, '\n')
+
+    # LOSO models
+    meta.train <- meta %>%
+      filter(Study != study)
+    
+    feat.train <- feat.all[,meta.train %>% pull(Sample_ID)]
+    
+    meta.train <- data.frame(meta.train)
+    rownames(meta.train) <- meta.train$Sample_ID
+    
+    siamcat <- siamcat(feat=feat.train, meta=meta.train, 
+                       label = 'Group', case='CRC')
+    siamcat <- normalize.features(siamcat, norm.method = 'log.std',
+                                norm.param = list(log.n0 = 1e-5, sd.min.q = 0.1, n.p = 2, norm.margin = 1), feature.type = 'original',
+                                verbose=3)
+    siamcat <- create.data.split(siamcat, num.folds = 10,
+                               num.resample = 10)
+     siamcat <- train.model(siamcat,
+                         method = 'lasso',
+                         measure = 'classif.auc',
+                         min.nonzero = 1,
+                         perform.fs = FALSE)
+    siamcat <- make.predictions(siamcat)
+    siamcat <- evaluate.predictions(siamcat)
+    models[[paste0(study, '_LOSO')]] <- siamcat
+    
+    cat("Successfully trained a LOSO model for study", study, '\n')
+  }
+  
+  auroc.all <- tibble()
+  
+  for (study in include_study){
+
+    # load model
+    siamcat <- models[[study]]
+    temp <- rowMeans(pred_matrix(siamcat))
+
+    
+    
+    # predict other studies
+    for (study_ext in setdiff(include_study, study)){
+
+      meta.test <- meta %>%
+        filter(Study == study_ext)
+
+      feat.test <- feat.all[,meta.test %>% pull(Sample_ID)]
+
+      meta.test <- data.frame(meta.test)
+      rownames(meta.test) <- meta.test$Sample_ID
+
+      siamcat.test <- siamcat(feat=feat.test, meta=meta.test,
+                       label = 'Group', case='CRC')
+
+      siamcat.test <- make.predictions(siamcat, siamcat.holdout = siamcat.test)
+
+
+
+      temp <- evaluate.predictions(siamcat.test)
+      auroc.all <- bind_rows(auroc.all,
+                             tibble(study.train=study,
+                                    study.test=study_ext,
+                                    AUC=c(eval_data(temp)$auroc)))
+
+    }
+
+  }
+
+  # ##############################################################################
+  # make LOSO Predictions
+  for (study in include_study){
+    
+    # load model
+    siamcat <- models[[paste0(study, '_LOSO')]]
+    
+    meta.test <- meta %>%
+      filter(Study == study)
+    
+    feat.test <- feat.all[,meta.test %>% pull(Sample_ID)]
+    
+    meta.test <- data.frame(meta.test)
+    rownames(meta.test) <- meta.test$Sample_ID
+    
+    siamcat.test <- siamcat(feat=feat.test, meta=meta.test, 
+                       label = 'Group', case='CRC')
+      
+    siamcat.test <- make.predictions(siamcat, siamcat.holdout = siamcat.test)
+  
+    temp <- evaluate.predictions(siamcat.test)
+    auroc.all <- bind_rows(auroc.all, 
+                             tibble(study.train="LOSO", 
+                                    study.test=study,
+                                    AUC=c(eval_data(temp)$auroc)))
+  }
+  
+  auroc.all$study.train = as.factor(auroc.all$study.train)
+  avg_model =  auroc.all %>% 
+      filter(study.test != study.train) %>% 
+      group_by(study.train) %>% 
+      summarise(AUC=mean(AUC)) %>% 
+      mutate(study.train=factor(study.train, levels=rev(include_study)))
+  
+  
+  avg_model$study.test = "Average" 
+  auroc.all.table = rbind(auroc.all, avg_model)
+  
+  auroc.all.table$method = method.name
+  
+    return(list(models = models,
+                auroc.table = auroc.all.table))
+}
+```
+
+
+```{r}
+res_unprocessed_lasso <- train_and_evaluate_models(meta,tss(feat.all), "Unprocessed")
+```
+
+# MetaDICT
+
+```{r}
+# check if all the taxa in taxonomy table
+sum(!rownames(count_filter)%in%taxonomy$taxa)
+taxonomy_filter <- taxonomy[which(taxonomy$taxa%in%rownames(count_filter)),c(1,4)]
+colnames(taxonomy_filter) <- c("Genus","Species")
+rownames(taxonomy_filter) <- taxonomy_filter$Species
+
+library(MetaDICT)
+metadict_meta <- data.frame("Group" = meta.crc$Group, "batch" = meta.crc$Study)
+rownames(metadict_meta) <- colnames(count_filter)
+species_metadict <- MetaDICT(feat.rel.red, metadict_meta, taxonomy = taxonomy_filter, tax_level = "Species", normalization = NULL)
+```
+
+```{r}
+metadict_lasso_res <- train_and_evaluate_models(meta,species_metadict$count, "MetaDICT")
+```
+
+# Combatseq
+
+```{r, warning=F}
+## other methods
+count_filter = count[f.idx,]
+res_ComBatSeq_lasso <- sva::ComBat_seq(as.matrix(count_filter), meta.crc$Study, group = meta.crc$Group)
+```
+
+```{r}
+combatseq_lasso_res <- train_and_evaluate_models(meta,tss(res_ComBatSeq_lasso), "ComBatSeq")
+```
+
+# MMUPHin
+
+```{r, warning=F}
+meta_sub1 <- as.data.frame(meta.crc)
+rownames(meta_sub1) <- colnames(count_filter)
+res_mmuphin <- adjust_batch(
+    feature_abd = count_filter,
+    batch = "Study",
+    covariates = c("Group"),
+    data = meta_sub1
+  )$feature_abd_adj
+```
+
+```{r}
+mmuphin_lasso_res <- train_and_evaluate_models(meta,tss(res_mmuphin), "MMUPHin")
+```
+
+# ConQuR
+
+```{r, warning=F}
+tax_tab <- t(count_filter)
+batchid <- factor(meta.crc$Study,levels = unique(meta.crc$Study), labels = 1:5)
+res_ConQuR <- t(ConQuR(tax_tab, batchid, batch_ref = 1, covariates = as.factor(meta.crc$Group)))
+```
+
+```{r}
+conqur_lasso_res <- train_and_evaluate_models(meta,tss(res_ConQuR), "ConQuR")
+```
+
+# Percentile
+
+```{r}
+O_ref <- feat.rel.red
+O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
+res_percentile <- percentile_norm(O_ref, meta.crc$Study, meta.crc$Group, "Control")
+```
+
+```{r}
+percentile_lasso_res <- train_and_evaluate_models(meta,tss(res_percentile), "Percentile-Norm")
+```
+
+# DEBIAS-M
+
+```{r}
+res_debiasm = t(read.csv("../data/Rawdata_Wirbel/debiasm_res_lasso.csv",row.names = 1))
+rownames(res_debiasm) = rownames(count_filter)
+colnames(res_debiasm) = colnames(count_filter)
+```
+
+```{r}
+debiasm_lasso_res <- train_and_evaluate_models(meta,tss(res_debiasm), "DEBIAS-M")
 ```
 

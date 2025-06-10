@@ -122,7 +122,7 @@ diff_set = sapply(data[[5]], function(i)paste("Microbial Community",i))
 ```
 
 
-## taxa community detection (S4a)
+## taxa community detection (4a)
 
 ```{r}
 cluster_graph = function(g, taxa_res, diff_set, title, colorset = "Set1"){
@@ -286,7 +286,7 @@ ggarrange(p1,p2,p3,p4,p5,p6,p7,p8,p9,common.legend = TRUE,nrow=1,legend="bottom"
 ggsave("../fig/taxa_cluster_cov.jpeg", dpi=300, units="in", width=20, height=3)
 ```
 
-# subpopulation detection
+# subpopulation detection (4b)
 
 ```{r}
 set.seed(2024)
@@ -364,7 +364,7 @@ ggsave("../fig/sample_cluster_cov.jpeg", dpi=300, units="in", width=20, height=3
 ```
 
 
-## Fig S6
+## Fig S9
 
 ```{r}
 library(RColorBrewer)
@@ -468,7 +468,7 @@ ggsave("../fig/debiasm_heatmap.jpeg", p9,dpi=300, units="in", width=8, height=6)
 ```
 
 
-# unsupervised 
+# unobserved
 
 ```{r}
 set.seed(1)
@@ -497,7 +497,7 @@ meta1$Y = paste("Subpopulation",meta1$Y)
 
 
 
-## taxa community detection (S4a)
+## taxa community detection (4a)
 
 ```{r}
 set.seed(2024)
@@ -621,7 +621,7 @@ ggarrange(p1,p2,p3,p4,p5,p6,p7,p8,p9,common.legend = TRUE,nrow=1,legend="bottom"
 ggsave("../fig/taxa_cluster_nocov.jpeg", dpi=300, units="in", width=20, height=3)
 ```
 
-# subpopulation detection
+# subpopulation detection (4b)
 
 ```{r}
 set.seed(2024)

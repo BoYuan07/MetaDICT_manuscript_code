@@ -228,7 +228,7 @@ ggplot(res, aes(x = Level, y = FDR, color = Method)) +
   )
 ```
 
-# S11b
+# S12b
 
 ```{r}
 load("../data/CRC_Duvallet.RData")

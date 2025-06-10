@@ -265,7 +265,7 @@ for(i in 1:(nrow(count)-1)){
   for(j in (i+1):nrow(count)){
     name2 <- rownames(count)[j]
     if(all(taxonomy[name1,1:6] == taxonomy[name2,1:6])){ 
-        #if two taxa are from same family
+        #if two taxa are from same genus
         adj_mat[i,j] <- 1
         next
       }else if(all(taxonomy[name1,1:5] == taxonomy[name2,1:5])){ 
@@ -308,7 +308,6 @@ write.csv(meta,file = "../result/pd1/meta_otu.csv")
 
 ```{r, warning=F}
 # other methods
-## other methods
 res_ComBatSeq <- sva::ComBat_seq(as.matrix(count), meta$Dataset, group = meta$Response)
 
 rownames(meta) <- colnames(count)
@@ -328,7 +327,7 @@ O_ref <- t(count)/colSums(count)
 O_ref[O_ref==0] <- runif(sum(O_ref==0),0,10-6)
 colnames(O_ref) <- rownames(count)
 rownames(O_ref) <- colnames(count)
-res_percentile <- t(percentile_norm(O_ref, meta$Dataset, meta$Response, "R"))
+res_percentile <- t(percentile_norm(O_ref, meta$Dataset, meta$Response, "NR"))
 
 O.clr <- microbiome::transform(count, "clr")
 res_plsda <- t(PLSDA_batch(t(O.clr), Y.trt = meta$Response, Y.bat = meta$Dataset, balance = F)$X.nobatch)
@@ -544,12 +543,12 @@ seeds[[6]] <- sample.int(n=1000, 1)
 ```
 
 ```{r}
-RF_pred <- function(train,test,trainy,testy){
+RF_pred <- function(train,test,trainy,testy, label = "R", levels = c("NR","R")){
   control <- trainControl(method = "cv",          # Cross-validation
                           number = 5,             # Number of folds
                           summaryFunction = twoClassSummary,  # For ROC
                           classProbs = TRUE,
-                          seeds = seeds)       # Enable probabilities for ROC
+                          seeds = seeds)       
   dataset <- data.frame(trainy,t(train))
   rf <- train(trainy~., data=dataset, 
                   method="rf", 
@@ -557,15 +556,20 @@ RF_pred <- function(train,test,trainy,testy){
                   trControl=control,
                   ntree = 500)
   rownames(test) <- colnames(dataset)[-1]
-  test_pred <- predict(rf, newdata = t(test))
-  actual <- testy
-  roc_object <- roc(actual,as.numeric(test_pred))
+  test_probs <- predict(rf, newdata = t(test), type = "prob")
+
+  # Extract probability for the positive class
+  positive_probs <- test_probs[[label]]
+
+  # Compute ROC
+  roc_object <- roc(response = testy, predictor = positive_probs, levels = levels, direction = "<")
+
   return(auc(roc_object))
 }
 ```
 
 ```{r}
-predict_task <- function(data,batchid,group,method){
+predict_task <- function(data,batchid,group,method, label = "R", levels = c("NR","R")){
   include_study <- unique(batchid)
   nbatch <- length(include_study)
   data.list <- list()
@@ -580,14 +584,15 @@ predict_task <- function(data,batchid,group,method){
     y.list[[i]] <- group[which(batchid==include_study[i])]
   }
   
+  
   for(j in 1:nbatch){
-    pred_res <- c(pred_res,RF_pred(data[,which(batchid!=include_study[j])],data.list[[j]],as.factor(group[which(batchid!=include_study[j])]), as.factor(y.list[[j]])))
-    train <- c(train,"LOSO")
+    pred_res <- c(pred_res,RF_pred(data[,which(batchid!=include_study[j])],data.list[[j]],as.factor(group[which(batchid!=include_study[j])]), as.factor(y.list[[j]]), label, levels))
+    train <- c(train,"Integrated Data")
     test <- c(test,include_study[j])
     type <- c(type, method)
   }
   
-  pred_ac_res = data.frame("AUCROC" = pred_res, "Train" = train, "Test" = test, "Type" = type)
+  pred_ac_res <- data.frame("AUCROC" = pred_res, "Train" = train, "Test" = test, "Type" = type)
   return(pred_ac_res)
 }
 ```
@@ -596,24 +601,25 @@ predict_task <- function(data,batchid,group,method){
 set.seed(2025)
 pred_unprocessed <- predict_task(count, meta$Dataset, meta$Response, "Unprocessed")
 pred_metadict <- predict_task(res_metadict, meta$Dataset, meta$Response, "MetaDICT")
+pred_conqur <- predict_task(res_ConQuR, meta$Dataset, meta$Response, "ConQuR")
 pred_combatseq <- predict_task(res_ComBatSeq, meta$Dataset, meta$Response, "ComBatSeq")
 pred_mmuphin <- predict_task(res_mmuphin, meta$Dataset, meta$Response, "MMUPHin")
-pred_percentile <- predict_task(res_percentile, meta$Dataset, meta$Response, "Percentile-Norm")
 pred_debiasm <- predict_task(res_debiasm, meta$Dataset, meta$Response, "DEBIAS-M")
 pred_plsda <- predict_task(res_plsda, meta$Dataset, meta$Response, "PLSDA-batch")
 pred_percentile <- predict_task(res_percentile, meta$Dataset, meta$Response, "Percentile-Norm")
+pred_scanvi <- predict_task(res_scanvi, meta$Dataset, meta$Response, "scANVI")
 ```
 
 ```{r}
-pred_ac_res = rbind(pred_unprocessed,pred_metadict,pred_combatseq,pred_mmuphin,pred_percentile,pred_debiasm,pred_plsda)
+pred_ac_res <- rbind(pred_unprocessed,pred_metadict,pred_combatseq,pred_mmuphin,pred_percentile,pred_debiasm,pred_plsda, pred_conqur, pred_scanvi)
 ```
 
 ```{r}
-method = unique(pred_ac_res$Type)
-train_set = unique(pred_ac_res$Train)
+method <- unique(pred_ac_res$Type)
+train_set <- unique(pred_ac_res$Train)
 for(i in 1:length(method)){
-   avg_value = sapply(train_set,function(j)mean(pred_ac_res$AUCROC[pred_ac_res$Train==j&pred_ac_res$Test!=j&pred_ac_res$Type==method[i]]))
-  pred_ac_res = rbind(pred_ac_res,data.frame("AUCROC" = avg_value,"Train" = train_set,"Type" = rep(method[i],length(train_set)),"Test"=rep("Average",length(train_set))))
+   avg_value <- sapply(train_set,function(j)mean(pred_ac_res$AUCROC[pred_ac_res$Train==j&pred_ac_res$Test!=j&pred_ac_res$Type==method[i]]))
+  pred_ac_res <- rbind(pred_ac_res,data.frame("AUCROC" = avg_value,"Train" = train_set,"Type" = rep(method[i],length(train_set)),"Test"=rep("Average",length(train_set))))
 }
 ```
 
@@ -703,3 +709,37 @@ write.csv(res_plsda.nc,"../result/pd1/plsda_nc.csv")
 write.csv(res_scanvi.nc,"../result/pd1/scanvi_nc.csv")
 write.csv(res_metadict.nc,file = "../result/pd1/metadict_nc.csv")
 ```
+
+```{r}
+# NC experiment for rf
+set.seed(2024)
+meta.nc$Y <- factor(meta.nc$Y,labels = c("G1","G2"))
+pred_unprocessed.nc <- predict_task(count, meta$Dataset, meta.nc$Y, "Unprocessed", label = "G2", levels = c("G1","G2"))
+pred_metadict.nc <- predict_task(res_metadict.nc, meta$Dataset, meta.nc$Y, "MetaDICT",label = "G2", levels = c("G1","G2"))
+
+pred_combatseq.nc <- predict_task(res_ComBatSeq.nc, meta$Dataset, meta.nc$Y, "ComBatSeq",label = "G2", levels = c("G1","G2"))
+pred_mmuphin.nc <- predict_task(res_mmuphin.nc, meta$Dataset, meta.nc$Y, "MMUPHin",label = "G2", levels = c("G1","G2"))
+pred_conqur.nc <- predict_task(res_ConQuR.nc, meta$Dataset, meta.nc$Y, "ConQuR",label = "G2", levels = c("G1","G2"))
+pred_plsda.nc <- predict_task(res_plsda.nc, meta$Dataset, meta.nc$Y, "PLSDA-batch",label = "G2", levels = c("G1","G2"))
+pred_percentile.nc <- predict_task(res_percentile.nc, meta$Dataset, meta.nc$Y, "Percentile-Norm",label = "G2", levels = c("G1","G2"))
+pred_scanvi.nc <- predict_task(res_scanvi.nc, meta$Dataset, meta.nc$Y, "scANVI",label = "G2", levels = c("G1","G2"))
+pred_debiasm.nc <- predict_task(res_debiasm.nc, meta$Dataset, meta.nc$Y, "DEBIAS-M",label = "G2", levels = c("G1","G2"))
+```
+
+```{r}
+pred_ac_res.nc <- rbind(pred_unprocessed.nc,pred_conqur.nc,pred_metadict.nc,pred_combatseq.nc,pred_mmuphin.nc,pred_percentile.nc,pred_debiasm.nc,pred_plsda.nc,pred_scanvi.nc)
+```
+
+```{r}
+method <- unique(pred_ac_res.nc$Type)
+train_set <- unique(pred_ac_res.nc$Train)
+for(i in 1:length(method)){
+   avg_value <- sapply(train_set,function(j)mean(pred_ac_res.nc$AUCROC[pred_ac_res.nc$Train==j&pred_ac_res.nc$Test!=j&pred_ac_res.nc$Type==method[i]]))
+  pred_ac_res.nc <- rbind(pred_ac_res.nc,data.frame("AUCROC" = avg_value,"Train" = train_set,"Type" = rep(method[i],length(train_set)),"Test"=rep("Average",length(train_set))))
+}
+```
+
+```{r}
+write.csv(pred_ac_res.nc,"../result/realdata_pd1_nc_rf.csv")
+```
+
