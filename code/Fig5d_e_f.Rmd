@@ -135,12 +135,17 @@ for(iter in 1:500){
 ```
 
 ```{r}
-knn_pred = function(train, test, Y_train, Y_test){
-  test_pred <- class::knn(train = t(train), test = t(test), cl = Y_train, k = 25, prob = TRUE)
-  probs <- attr(test_pred, "prob")
-  positive_class <- "Class1"
-  positive_probs <- ifelse(test_pred == positive_class, probs, 1 - probs)
-  roc_object <- roc(Y_test, positive_probs, direction = "<")
+knn_pred = function(train, test, trainy, testy){
+  dataset = data.frame(trainy, t(train))
+  knn_fit <- train(trainy ~ ., data = dataset,
+             method = "knn",
+             tuneLength = 5,           # try several k values
+             metric = 'ROC',
+             trControl = trainControl(method = "cv", number = 5,summaryFunction = twoClassSummary, classProbs = TRUE))
+  rownames(test) <- colnames(dataset)[-1]
+  test_pred <- predict(knn_fit, newdata = t(test), type = "prob")
+  positive_probs <- test_pred[["Class1"]]
+  roc_object <- roc(response = testy, predictor = positive_probs, direction = "<")
   return(list("AUC" = auc(roc_object), "Object" = roc_object))
 }
 
