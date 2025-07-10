@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15852044.svg)](https://doi.org/10.5281/zenodo.15852044)
+
 # MetaDICT-manuscript-code
 This is the repository archiving code and data for Microbiome Data Integration via Shared Dictionary Learning.
 
